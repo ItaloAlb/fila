@@ -618,11 +618,12 @@ def _run(ctx: Context, args: argparse.Namespace) -> int:
     if args.dir is not None:
         spec["dir"] = args.dir
     views = {node.name: node for node in ctx.store.nodes()}
+    drained = ctx.store.drained()  # the views only learn of a drain in the next cycle
     snapshot_jobs = ctx.store.snapshot(ctx.clock()).jobs
     ids = []
     for name in targets:
         view = views.get(name)
-        state = view.state if view else "unreachable"
+        state = "drained" if name in drained else (view.state if view else "unreachable")
         if state == "online" and args.strict and not request.fits_in(free_now(view, snapshot_jobs)):
             raise Refused(f"{name} does not have {describe(request)} free now")
         not_run = None if state == "online" else state

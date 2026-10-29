@@ -190,7 +190,7 @@ O `register` **valida antes de aceitar**. Se qualquer verificação falhar, o n�
   - Agendador de Tarefas no Windows.
 
   `fila server --install` (e `--uninstall`, com `--dry-run` para só mostrar os passos) monta o serviço. Todos rodam `<home>/server_launcher.py`, que sabe onde estão o código e o `FILA_HOME` e manda a saída para `<home>/server.log`. Detalhes por sistema:
-  - Linux: unidade em `~/.config/systemd/user/fila-server.service` com `Restart=on-failure`, `systemctl --user enable --now` e `loginctl enable-linger`.
+  - Linux: unidade em `~/.config/systemd/user/fila-server.service` com `Restart=on-failure` e `KillMode=process` (os supervisores ficam no cgroup do serviço, e reiniciá-lo não pode matar os trabalhos), `systemctl --user enable --now` e `loginctl enable-linger`.
   - macOS: *LaunchAgent* em `~/Library/LaunchAgents/org.fila.fila-server.plist`, com `KeepAlive`.
   - Windows: tarefa agendada definida por XML, que inicia no logon na sessão do usuário (`InteractiveToken`), com `pythonw.exe` (sem janela), **sem limite de execução** (`PT0S`; o padrão do Windows derrubaria o servidor depois de 72 h) e reinício em caso de falha.
 - **Um ciclo com erro não para o servidor.** O erro vai para `server.log`, e o ciclo seguinte tenta de novo.
@@ -403,7 +403,10 @@ Os recursos declarados não são uma promessa. O `fila` os impõe da mesma forma
   - limite de memória do *Job Object* no Windows.
 - Onde não permite (macOS, ou Linux sem cgroup delegado), o supervisor mede a memória do grupo de processos a cada poucos segundos e mata o trabalho se ela passar do declarado.
 - Nos dois casos, o resultado é `failed` com motivo `out_of_memory`.
-- **Estado atual da implementação:** o Windows já usa o limite rígido e é avisado pelo *Job Object* quando um processo tenta passar dele. O Linux e o macOS ainda só medem e matam; o cgroup no Linux entra quando houver um Linux para testar.
+- **Estado atual da implementação:**
+  - o Windows usa o limite rígido e é avisado pelo *Job Object* quando um processo tenta passar dele;
+  - o Linux usa o limite rígido quando o `systemd-run --user --scope` funciona e o controlador `memory` está delegado ao usuário. Cada tentativa ganha um *scope* `fila-<pid>-<ms>.scope` com `MemoryMax` igual ao declarado, `MemorySwapMax=0` e `OOMPolicy=stop`; o supervisor lê o `oom_kill` do `memory.events` do *scope* para dar o motivo `out_of_memory`. Sem delegação, mede e mata, e o `selftest` diz qual dos dois vale no nó. Conferido no `lab` (Ubuntu, systemd 255) em 2026-10-29;
+  - o macOS só mede e mata.
 
 **Tempo**
 - Ao passar do `--time`, o supervisor envia `SIGTERM`, espera 30 s e envia `SIGKILL`. O resultado é `failed` com motivo `timeout`.
@@ -420,7 +423,7 @@ O `fila` **não** define `OMP_NUM_THREADS` nem variáveis de outros programas, c
 
 **Detecção.** A máquina está "em uso" se houve entrada de teclado ou mouse nos últimos `idle_minutes`:
 - `GetLastInputInfo` no Windows;
-- `IdleHint` da sessão (`loginctl`) no Linux;
+- `IdleHint` das sessões **locais** do usuário (`loginctl`, `Remote=no`) no Linux. As sessões remotas (SSH, inclusive o canal de um nó `pull`) não contam: o logind nunca as dá como ociosas, e elas deixariam a máquina sempre "em uso". O ambiente gráfico só marca a sessão como ociosa depois do seu próprio tempo de inatividade (no GNOME, `org.gnome.desktop.session idle-delay`); com ele em `0`, a sessão nunca fica ociosa;
 - `HIDIdleTime` (`ioreg`) no macOS.
 
 No Windows, isso exige que o trabalhador rode na sessão do usuário, como tarefa agendada que inicia no logon.

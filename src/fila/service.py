@@ -83,7 +83,9 @@ def install_plan(home: str, name: str = "fila-server", system_name: str = None, 
         unit = os.path.expanduser(f"~/.config/systemd/user/{name}.service")
         plan.files[unit] = (
             f"[Unit]\nDescription={description}\nAfter=network-online.target\n\n"
-            f"[Service]\nExecStart={python} {launcher}\nRestart=on-failure\nRestartSec=10\n\n"
+            f"[Service]\nExecStart={python} {launcher}\nRestart=on-failure\nRestartSec=10\n"
+            # The supervisors it starts live in its cgroup: a restart must not kill the running jobs.
+            "KillMode=process\n\n"
             "[Install]\nWantedBy=default.target\n"
         )
         plan.commands = [

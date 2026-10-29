@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 
+from fila import supervisor
 from fila.supervisor import pid_alive, read_status, request, supervise, write_spec
 
 AFFINITY = textwrap.dedent(
@@ -135,6 +136,54 @@ class OutcomeTest(SupervisorCase):
         with open(os.path.join(self.cwd, "grandchild.pid")) as handle:
             grandchild = int(handle.read())
         self.wait_for(lambda: not pid_alive(grandchild))
+
+
+CGROUP = textwrap.dedent(
+    """
+    path = [line for line in open("/proc/self/cgroup") if line.startswith("0::")][0][3:].strip()
+    print(path.rsplit("/", 1)[-1], open("/sys/fs/cgroup" + path + "/memory.max").read().strip())
+    """
+)
+
+
+@unittest.skipUnless(supervisor.cgroup_memory_limit(), "no cgroup v2 memory controller delegated to the user")
+class CgroupMemoryTest(SupervisorCase):
+    """Linux with systemd: a hard limit in a scope of its own (section 6.3)."""
+
+    def test_job_runs_in_a_scope_with_the_declared_limit(self):
+        self.spec(CGROUP, mem=100 * 1024 * 1024)
+
+        status = self.run_supervisor()
+
+        self.assertEqual(status["exit_code"], 0, self.output("stderr.log"))
+        scope, limit = self.output().split()
+        self.assertTrue(scope.startswith("fila-") and scope.endswith(".scope"), scope)
+        self.assertEqual(limit, str(100 * 1024 * 1024))
+
+    def test_job_beyond_the_limit_is_killed_by_the_kernel(self):
+        self.spec("x = bytearray(400 * 1024 * 1024); print(len(x))", mem=100 * 1024 * 1024)
+
+        status = self.run_supervisor()
+
+        self.assertEqual(status["reason"], "out_of_memory")
+        self.assertEqual(self.output(), "")
+
+
+class MeasuredMemoryTest(SupervisorCase):
+    """Where no cgroup is delegated, memory is measured and the group killed."""
+
+    def setUp(self):
+        super().setUp()
+        saved = supervisor._cgroup_memory
+        supervisor._cgroup_memory = False
+        self.addCleanup(setattr, supervisor, "_cgroup_memory", saved)
+
+    def test_memory_beyond_the_declared_amount_ends_the_job(self):
+        self.spec("import time; x = bytearray(400 * 1024 * 1024); time.sleep(30)", mem=100 * 1024 * 1024)
+
+        status = self.run_supervisor()
+
+        self.assertEqual(status["reason"], "out_of_memory")
 
 
 class ControlTest(SupervisorCase):

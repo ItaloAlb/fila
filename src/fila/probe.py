@@ -159,18 +159,35 @@ def _idle_seconds() -> float:
 
 
 def _linux_idle_seconds() -> float:
-    """From the session manager: ``IdleHint`` and when it was set."""
-    output = subprocess.check_output(
-        ["loginctl", "show-user", str(os.getuid()), "--property=IdleHint", "--property=IdleSinceHint"],
-        text=True,
-        stderr=subprocess.DEVNULL,
-        timeout=5,
+    """From the session manager: ``IdleHint`` of the user's local sessions.
+    Remote ones (SSH, such as a pull node's channel) are not keyboard or mouse
+    and never become idle, so they would keep the machine "in use"."""
+
+    def loginctl(*args: str) -> str:
+        return subprocess.check_output(["loginctl", *args], text=True, stderr=subprocess.DEVNULL, timeout=5)
+
+    sessions = loginctl("show-user", str(os.getuid()), "--property=Sessions").strip().partition("=")[2].split()
+    if not sessions:
+        return float("inf")
+    output = loginctl(
+        "show-session", *sessions, "--property=Remote", "--property=IdleHint", "--property=IdleSinceHint"
     )
-    values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-    if values.get("IdleHint") != "yes":
-        return 0.0
-    since = int(values.get("IdleSinceHint", "0")) / 1e6
-    return max(0.0, time.time() - since) if since else float("inf")
+    return linux_idle_seconds(output, time.time())
+
+
+def linux_idle_seconds(output: str, now: float) -> float:
+    """``loginctl show-session`` of several sessions (blocks apart by blank lines)."""
+    idle = float("inf")
+    for block in output.split("\n\n"):
+        values = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if not values or values.get("Remote") != "no":
+            continue
+        if values.get("IdleHint") != "yes":
+            return 0.0
+        since = int(values.get("IdleSinceHint", "0")) / 1e6
+        if since:
+            idle = min(idle, max(0.0, now - since))
+    return idle
 
 
 def _macos_idle_seconds() -> float:

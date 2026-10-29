@@ -16,6 +16,7 @@ Files in the attempt directory:
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -168,17 +169,28 @@ def _write_status(attempt_dir: str, status: dict) -> None:
 
 
 class _PosixGroup:
-    """Affinity via ``sched_setaffinity`` (inherited by children); memory is
-    measured over the process group and enforced by killing it."""
+    """Affinity via ``sched_setaffinity`` (inherited by children). Memory has
+    a hard limit in a cgroup v2 scope where systemd delegates one to the user
+    (Linux); elsewhere it is measured over the process group and enforced by
+    killing it."""
 
     def __init__(self, cpus: List[int], mem: Optional[int]) -> None:
         self.cpus = cpus
         self.mem = mem
         self.pgid: Optional[int] = None
         self._exceeded = False
+        self.scope: Optional[str] = None
+        self._events: Optional[str] = None
+        if mem is not None and cgroup_memory_limit():
+            self.scope = f"fila-{os.getpid()}-{int(time.time() * 1000)}.scope"
 
     def start(self, args: List[str], **kwargs) -> subprocess.Popen:
         cpus = self.cpus
+        if self.scope is not None:  # systemd-run execs the command in place: same pid, session and affinity
+            args = [
+                "systemd-run", "--user", "--scope", "--quiet", f"--unit={self.scope}",
+                "-p", f"MemoryMax={self.mem}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=stop", "--",
+            ] + list(args)
 
         def pin() -> None:
             if cpus and hasattr(os, "sched_setaffinity"):
@@ -189,7 +201,11 @@ class _PosixGroup:
         return process
 
     def memory_exceeded(self) -> bool:
-        if self.mem is not None and not self._exceeded and self.pgid is not None:
+        if self.mem is None or self._exceeded or self.pgid is None:
+            return self._exceeded
+        if self.scope is not None:  # the kernel already killed it; only notice
+            self._exceeded = self._oom_killed()
+        else:
             self._exceeded = _group_rss(self.pgid) > self.mem
         return self._exceeded
 
@@ -219,8 +235,59 @@ class _PosixGroup:
     def resume(self) -> None:
         self._signal(signal.SIGCONT)
 
+    def _oom_killed(self) -> bool:
+        """The scope's own events while it lives; systemd's verdict once it is gone."""
+        if self._events is None:
+            try:
+                with open(f"/proc/{self.pgid}/cgroup") as handle:
+                    path = next(line[3:].strip() for line in handle if line.startswith("0::"))
+                if path.endswith("/" + self.scope):  # not before systemd-run has moved itself in
+                    self._events = f"/sys/fs/cgroup{path}/memory.events"
+            except (OSError, StopIteration):
+                pass
+        if self._events is not None:
+            try:
+                with open(self._events) as handle:
+                    events = dict(line.split() for line in handle if line.strip())
+                return int(events.get("oom_kill", 0)) > 0
+            except OSError:
+                pass
+        answer = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "Result", "--value", self.scope], capture_output=True, text=True
+        )
+        return answer.stdout.strip() == "oom-kill"
+
     def close(self) -> None:
-        pass
+        if self.scope is not None:  # a scope ended by the OOM killer stays loaded as failed
+            subprocess.run(["systemctl", "--user", "reset-failed", self.scope], capture_output=True)
+
+
+_CGROUP_PROBE = """
+path = [line for line in open('/proc/self/cgroup').read().splitlines() if line.startswith('0::')][0][3:]
+print(open('/sys/fs/cgroup' + path + '/memory.max').read().strip())
+"""
+
+_cgroup_memory: Optional[bool] = None
+
+
+def cgroup_memory_limit() -> bool:
+    """Whether ``systemd-run --user --scope -p MemoryMax=...`` really limits
+    memory here: Linux, cgroup v2, a user manager and a delegated memory controller."""
+    global _cgroup_memory
+    if _cgroup_memory is None:
+        _cgroup_memory = False
+        if sys.platform.startswith("linux") and shutil.which("systemd-run") and shutil.which("systemctl"):
+            limit = 64 * 1024 * 1024
+            try:
+                answer = subprocess.run(
+                    ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={limit}", "--",
+                     sys.executable, "-c", _CGROUP_PROBE],
+                    capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+                )
+                _cgroup_memory = answer.returncode == 0 and answer.stdout.strip() == str(limit)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return _cgroup_memory
 
 
 def _group_rss(pgid: int) -> int:

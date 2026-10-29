@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from fila.probe import LocalProbe
+from fila.probe import LocalProbe, linux_idle_seconds
 
 
 class LocalProbeTest(unittest.TestCase):
@@ -32,6 +32,23 @@ class LocalProbeTest(unittest.TestCase):
 
     def test_disk_free_is_reported_for_a_directory(self):
         self.assertGreater(self.probe.disk_free(os.getcwd()), 0)
+
+
+class LinuxIdleTest(unittest.TestCase):
+    """``loginctl show-session`` output of several sessions, as systemd 255 prints it."""
+
+    def test_remote_session_that_never_idles_does_not_count(self):
+        output = "Remote=no\nIdleHint=yes\nIdleSinceHint=1000000000\n\nRemote=yes\nIdleHint=no\nIdleSinceHint=0\n"
+
+        self.assertEqual(linux_idle_seconds(output, now=1600.0), 600.0)
+
+    def test_active_local_session_means_in_use(self):
+        output = "Remote=no\nIdleHint=no\nIdleSinceHint=0\n\nRemote=no\nIdleHint=yes\nIdleSinceHint=1000000000\n"
+
+        self.assertEqual(linux_idle_seconds(output, now=1600.0), 0.0)
+
+    def test_only_remote_sessions_is_never_in_use(self):
+        self.assertEqual(linux_idle_seconds("Remote=yes\nIdleHint=no\nIdleSinceHint=0\n", now=1600.0), float("inf"))
 
 
 if __name__ == "__main__":

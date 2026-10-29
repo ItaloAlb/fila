@@ -20,6 +20,7 @@ class ServicePlanTest(unittest.TestCase):
         unit = next(content for path, content in plan.files.items() if path.endswith(".service"))
         self.assertIn(f"ExecStart=/usr/bin/python3 {os.path.join(self.home, 'server_launcher.py')}", unit)
         self.assertIn("Restart=on-failure", unit)
+        self.assertIn("KillMode=process", unit)  # restarting the server leaves the jobs running
         self.assertIn(["systemctl", "--user", "enable", "--now", "fila-server.service"], plan.commands)
         self.assertEqual(plan.commands[-1][:2], ["loginctl", "enable-linger"])
 

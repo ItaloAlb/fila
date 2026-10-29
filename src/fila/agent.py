@@ -297,7 +297,11 @@ def selftest(args: dict) -> List[dict]:
     status, _, _ = run("time_limit", "import time; time.sleep(60)", time_limit=1.0)
     record("time_limit", status["reason"] == "timeout" and time.time() - started < 15, str(status["reason"]))
     status, _, _ = run("memory_limit", "x = bytearray(512 * 1024 * 1024); print(len(x))", mem=128 * 1024 * 1024)
-    record("memory_limit", status["reason"] == "out_of_memory", str(status["reason"]))
+    if sys.platform == "win32":
+        how = "hard limit (Job Object)"
+    else:
+        how = "hard limit (cgroup)" if supervisor.cgroup_memory_limit() else "measured and killed"
+    record("memory_limit", status["reason"] == "out_of_memory", f"{status['reason']}: {how}")
     cpus = [0, 1] if (os.cpu_count() or 1) > 1 else [0]
     status, directory, _ = run("cpu_affinity", _AFFINITY_PROGRAM, cpus=cpus)
     with open(os.path.join(directory, "stdout.log")) as handle:
