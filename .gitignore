@@ -1,0 +1,10 @@
+# AI assistant files are not tracked
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.pyz
