@@ -290,7 +290,10 @@ on. `resume` returns it to normal.
   - Windows: a scheduled task defined in XML that starts at logon in the
     user's session (`InteractiveToken`), with `pythonw.exe` (no window), **no
     execution time limit** (`PT0S`; the Windows default would stop the server
-    after 72 h) and restart on failure.
+    after 72 h) and restart on failure. A process without a console starts
+    every console program (`ssh`, a node's shell, `schtasks`) with
+    `CREATE_NO_WINDOW`, so no window opens on the desktop at each cycle; from a
+    terminal, children share it as usual.
 - **A failing cycle does not stop the server.** The error goes to `server.log`,
   and the next cycle tries again.
 - **Reconciliation at start.** For each job marked `running`, the server checks

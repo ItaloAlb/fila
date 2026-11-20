@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import BinaryIO, Callable, List, Optional
 
 from . import __version__, agent
+from .console import no_window
 from .errors import AgentError, NodeUnreachable
 from .executor import Executor
 from .files import read_json, write_json
@@ -194,13 +195,16 @@ def _session(coordinator: str, node: str, ssh_command: List[str], remote_command
     os.makedirs(home_dir, exist_ok=True)
     wake_file = os.path.join(home_dir, "wake")
     command = f"{remote_command} internal channel --node {shlex.quote(node)}"
+    ssh_log = open(os.path.join(home_dir, "ssh.log"), "ab")
     try:
         process = subprocess.Popen(
             list(ssh_command) + [coordinator, command],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.path.join(home_dir, "ssh.log"), "ab"),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=ssh_log, creationflags=no_window(),
         )
     except OSError as error:
         return f"cannot start ssh: {error}"
+    finally:
+        ssh_log.close()  # ssh keeps its own copy of the handle
     lock = threading.Lock()
     heard = [time.time()]
     pool = ThreadPoolExecutor(max_workers=8)

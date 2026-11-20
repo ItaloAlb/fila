@@ -23,6 +23,7 @@ import zlib
 from typing import Callable, Dict, List, Optional
 
 from . import __version__, slurm, supervisor
+from .console import no_window
 from .probe import LocalProbe
 from .units import format_mem
 
@@ -219,7 +220,8 @@ def clean(args: dict) -> dict:
 
 def check_shell(args: dict) -> dict:
     try:
-        result = subprocess.run(list(args["shell"]) + ["echo ok"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(list(args["shell"]) + ["echo ok"], capture_output=True, text=True, timeout=30,
+                                creationflags=no_window())
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"ok": False, "message": f"the shell does not run: {error}"}
     if result.returncode != 0 or "ok" not in result.stdout:
@@ -246,7 +248,8 @@ def time_command(args: dict) -> dict:
     """Wall time of a user benchmark run through the node's shell, in ``cwd``."""
     cwd = os.path.expanduser(args.get("cwd") or "~")
     started = time.perf_counter()
-    result = subprocess.run(list(args["shell"]) + [args["command"]], cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(list(args["shell"]) + [args["command"]], cwd=cwd, capture_output=True, text=True,
+                            creationflags=no_window())
     return {"seconds": time.perf_counter() - started, "exit_code": result.returncode, "stderr": result.stderr[-2000:]}
 
 

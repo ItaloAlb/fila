@@ -17,6 +17,7 @@ from typing import List, Optional
 
 from . import agent
 from .bundle import agent_archive
+from .console import no_window
 from .errors import AgentError, NodeUnreachable
 
 AGENT_PATH = ".fila/fila.pyz"  # relative to the remote user's home
@@ -108,7 +109,8 @@ class SshExecutor(Executor):
     def _ssh(self, remote: str, data: bytes = b"", timeout: Optional[float] = None) -> subprocess.CompletedProcess:
         try:
             result = subprocess.run(
-                self.ssh_command + [self.host, remote], input=data, capture_output=True, timeout=timeout or self.timeout
+                self.ssh_command + [self.host, remote], input=data, capture_output=True, timeout=timeout or self.timeout,
+                creationflags=no_window(),
             )
         except subprocess.TimeoutExpired:
             raise NodeUnreachable(f"{self.node}: no answer in {timeout or self.timeout:.0f} s") from None

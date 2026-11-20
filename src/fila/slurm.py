@@ -21,6 +21,7 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Tuple
 
+from .console import no_window
 from .errors import AgentError, NodeUnreachable
 from .units import format_mem, parse_duration
 
@@ -210,7 +211,8 @@ def _epoch(text: str) -> Optional[float]:
 def _remote(args: dict, command: str, data: bytes = b"", timeout: float = 120.0) -> tuple:
     try:
         result = subprocess.run(
-            list(args["ssh_command"]) + [args["host"], command], input=data, capture_output=True, timeout=timeout
+            list(args["ssh_command"]) + [args["host"], command], input=data, capture_output=True, timeout=timeout,
+            creationflags=no_window(),
         )
     except subprocess.TimeoutExpired:
         raise NodeUnreachable(f"{args['host']}: no answer in {timeout:.0f} s") from None

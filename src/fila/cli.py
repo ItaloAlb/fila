@@ -26,6 +26,7 @@ from typing import Callable, List, Mapping, Optional, TextIO
 
 from . import agent, service, supervisor
 from .bundle import agent_archive
+from .console import no_window
 from .executor import AgentError, NodeUnreachable, SshExecutor, executor_for
 from .registry import NodeEntry, Registry, RegistryError, load_toml
 from .scheduler import Resources, Start, check_request, describe, free_now
@@ -221,6 +222,7 @@ def _forward(config: dict, argv: List[str], out: TextIO, err: TextIO, environ: M
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(environ),
+            creationflags=no_window(),  # e.g. the MCP server, started by an app without a console
         )
     except OSError as error:
         err.write(f"fila: cannot start ssh: {error}\n")
@@ -1113,7 +1115,7 @@ def _worker_install(ctx: Optional[Context], args: argparse.Namespace) -> int:
     if not os.path.exists(key):
         try:
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"fila-{args.node}", "-f", key],
-                           check=True, capture_output=True)
+                           check=True, capture_output=True, creationflags=no_window())
         except (OSError, subprocess.CalledProcessError) as error:
             args.err.write(f"fila: cannot create the key with ssh-keygen: {error}\n")
             return EXIT_FAILED
