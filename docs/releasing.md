@@ -33,7 +33,8 @@ tag:
 - `src/fila/supervisor.py` (the attempt journal)
 - `src/fila/mcp.py` (`TOOLS`)
 - `src/fila/store.py` (`SCHEMA`: a database from an earlier version must keep
-  working, through `_LATER_COLUMNS`)
+  working, through `_LATER_COLUMNS`, which adds a new column to old databases;
+  new columns also go into `SCHEMA`, so a new database never needs it)
 
 | Change | From 1.0.0 | While 0.x |
 |---|---|---|

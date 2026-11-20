@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -279,6 +280,13 @@ def _parser() -> argparse.ArgumentParser:
     resources = commands.add_parser("resources", parents=[common], help="what each node has free right now")
     resources.set_defaults(handler=_resources)
 
+    top = commands.add_parser("top", parents=[common], help="one view of the nodes and the jobs, like htop")
+    top.add_argument("--once", action="store_true", help="print one screen and exit")
+    top.add_argument("--node", help="only this node and its jobs")
+    top.add_argument("--all", action="store_true", help="include finished jobs")
+    top.add_argument("--width", type=int, help="columns to draw (default: the terminal's width)")
+    top.set_defaults(handler=_top)
+
     result = commands.add_parser("result", parents=[common], help="a job's outcome and attempts")
     result.add_argument("job", type=int)
     result.set_defaults(handler=_result)
@@ -514,6 +522,23 @@ def _resources(ctx: Context, args: argparse.Namespace) -> int:
             f" {format_mem(node.capacity.get('mem', 0))}  speed {node.speed}"
         )
     ctx.emit(rows, "\n".join(lines) or "no nodes registered")
+    return EXIT_OK
+
+
+def _top(ctx: Context, args: argparse.Namespace) -> int:
+    """Section 11: the nodes, the jobs and why each waiting job waits, on one screen."""
+    from . import top
+
+    if not args.once:
+        raise UsageError("the interactive view is not available yet; use fila top --once")
+    general = ctx.registry.load()[0]
+    snapshot = top.collect(ctx.store, ctx.home, ctx.clock(), float(general["probe_interval_s"]),
+                           show_finished=args.all, node=args.node)
+    if ctx.json:
+        ctx.out.write(json.dumps(snapshot, indent=2) + "\n")
+        return EXIT_OK
+    width = args.width or shutil.get_terminal_size((100, 24)).columns
+    ctx.out.write("\n".join(top.render(snapshot, width, charset=top.charset_for(ctx.out))) + "\n")
     return EXIT_OK
 
 

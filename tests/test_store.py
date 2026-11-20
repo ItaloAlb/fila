@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: 2026 The fila Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import json
 import os
 import shutil
+import sqlite3
 import tempfile
 import threading
 import unittest
 
 from fila.scheduler import Block, Node, Plan, Reason, Release, Resources, Start, SubmitToSlurm, Unblock, plan
-from fila.store import Store
+from fila.store import SCHEMA, Store
 
 GiB = 1024**3
 
@@ -53,6 +55,30 @@ class OpenTest(unittest.TestCase):
                 thread.join()
 
         self.assertEqual(errors, [])
+
+    def test_a_database_from_fila_0_1_0_gains_the_new_columns(self):
+        home = tempfile.mkdtemp(prefix="fila-test-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        path = os.path.join(home, "fila.db")
+        old = SCHEMA.replace("    suspended INTEGER NOT NULL DEFAULT 0,\n    suspended_seconds REAL NOT NULL DEFAULT 0,\n", "")
+        self.assertNotEqual(old, SCHEMA)
+        db = sqlite3.connect(path)
+        with db:
+            db.executescript(old)
+            db.execute("INSERT INTO jobs (id, command, state, request, spec, created_by, submitted_at)"
+                       " VALUES (1, 'true', 'running', ?, '{}', 'user', 0)", (json.dumps({"cores": 1, "mem": GiB}),))
+            db.execute("INSERT INTO attempts (job_id, number, state, node, started_at) VALUES (1, 1, 'running', 'lab', 0)")
+            db.execute("INSERT INTO nodes (name, data) VALUES ('lab', ?)", (json.dumps({
+                "name": "lab", "kind": "computer", "state": "online", "capacity": {"cores": 4}, "probe_free": {},
+                "reserve": {}, "speed": 1.0, "topology": [], "default_hint": "multithread", "slurm": [],
+                "max_cores_per_job": None, "max_pending": 2, "exclude": []}),))
+        db.close()
+
+        store = Store(path)
+
+        attempt = store.job(1).attempts[0]
+        self.assertEqual((attempt["suspended"], attempt["suspended_seconds"]), (False, 0.0))
+        self.assertIsNone(store.nodes()[0].in_use)
 
 
 class SnapshotTest(StoreCase):

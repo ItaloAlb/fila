@@ -561,7 +561,9 @@ Results of a `run`, per node: `completed`, `failed` (reasons `exit_code` and
 ### 5.6 Attempts
 
 - Each job has one or more attempts. Each attempt keeps its own node, CPUs,
-  start, end, state, reason, exit code and logs.
+  start, end, state, reason, exit code and logs and, on computers, whether it
+  is suspended now and the time it has spent suspended, as its journal reported
+  them at the last cycle (`suspended`, `suspended_seconds` in `result --json`).
 - `fila retry <id> [--on <node>]` creates a new attempt. It applies to `failed`,
   `cancelled` or `unreachable` jobs.
 - **Abandoned attempt.** When a job is resubmitted while its node is out of
@@ -918,6 +920,7 @@ fila run "<command>" --on <nodes|all|online> [...]       # the terminal, now (se
 fila submit [...] -- <command>                            # the queue (section 5.3)
 fila status [--state S] [--node N] [--all]                # queue, running jobs and node summary
 fila resources                                            # what each node has free now
+fila top --once [--node N] [--all] [--width W]            # nodes, jobs and why each waits, on one screen
 fila guide                                                # the usage guide for an agent's instructions
 fila mcp [--register]                                     # the MCP server (stdio), or how to register it
 fila result <id>                                          # state, reason, code, node, attempts, directory, end of the log
@@ -940,6 +943,21 @@ fila internal ...                                         # internal use (channe
 "pending: needs 6 cores; desktop has 4 free (2 used outside fila); cluster-cpu
 excluded by --on; waiting since 14:02; node reservation in 38 min (starvation
 protection)".
+
+**`top`.** One screen with the nodes and the jobs, like `htop`. The node panel
+shows each node's state, a bar per resource (cores and memory: what `fila`'s
+jobs hold, what other use and the reserve take, and what is free, with the
+used amount over the capacity), the speed factor, and whether someone is using
+the machine (section 6.5); for a cluster, how many of `fila`'s jobs are pending
+in Slurm against `max_pending_slurm` (section 7.5). The job panel shows the
+active jobs (`--all` adds the finished ones) with their state (`suspended` for
+a frozen running job), node, requested cores and memory, the attempt's running
+time without the time it spent suspended, and, for a waiting job, the reason
+`explain` gives, in a few words. The header warns `server not running` when
+the coordinator's heartbeat is old; the view still shows the database. Columns
+shrink or disappear below about 80 columns, the command first. `--once` prints
+one screen and exits; with `--json` it prints the same snapshot as data. The
+interactive view (refresh, keys, actions) is not available yet.
 
 **`wait`.** Blocks until every given job reaches a final state: `completed`,
 `failed`, `cancelled` or `blocked`. It only reads the local database, about once

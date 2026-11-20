@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     exit_code INTEGER,
     started_at REAL,
     finished_at REAL,
+    suspended INTEGER NOT NULL DEFAULT 0,
+    suspended_seconds REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (job_id, number)
 );
 CREATE TABLE IF NOT EXISTS node_flags (
@@ -99,8 +101,11 @@ CREATE TABLE IF NOT EXISTS reasons (
 """
 
 FINAL_STATES = ("completed", "failed", "cancelled", "not_run")
-# Columns added after the first schema, added to older databases on open.
-_LATER_COLUMNS = {"kind": "TEXT NOT NULL DEFAULT 'submit'", "hold": "INTEGER", "unreachable_since": "REAL"}
+# Columns added after the first schema, by table, added to older databases on open.
+_LATER_COLUMNS = {
+    "jobs": {"kind": "TEXT NOT NULL DEFAULT 'submit'", "hold": "INTEGER", "unreachable_since": "REAL"},
+    "attempts": {"suspended": "INTEGER NOT NULL DEFAULT 0", "suspended_seconds": "REAL NOT NULL DEFAULT 0"},
+}
 # What ``fila wait`` waits for: a blocked job will not move until someone retries its cause.
 SETTLED_STATES = FINAL_STATES + ("blocked",)
 RETRYABLE = ("failed", "cancelled", "unreachable")
@@ -151,6 +156,14 @@ def _use_wal(db: sqlite3.Connection, patience_s: float = 30.0) -> None:
             time.sleep(0.02)
 
 
+def _add_column(db: sqlite3.Connection, table: str, name: str, definition: str) -> None:
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    except sqlite3.OperationalError as error:  # another process opening the same old database added it first
+        if "duplicate column" not in str(error):
+            raise
+
+
 class Store:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -159,10 +172,11 @@ class Store:
         with self._connect() as db:
             _use_wal(db)
             db.executescript(SCHEMA)
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
-            for name, definition in _LATER_COLUMNS.items():
-                if name not in columns:
-                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            for table, later in _LATER_COLUMNS.items():
+                columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                for name, definition in later.items():
+                    if name not in columns:
+                        _add_column(db, table, name, definition)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -564,6 +578,14 @@ class Store:
         with self._connect() as db:
             db.execute("UPDATE jobs SET hold = ? WHERE id = ?", (None if hold is None else int(hold), job_id))
 
+    def attempt_progress(self, job_id: int, number: int, suspended: bool, suspended_seconds: float) -> None:
+        """What the attempt's journal says now: frozen or not, and the time frozen so far."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE attempts SET suspended = ?, suspended_seconds = ? WHERE job_id = ? AND number = ?",
+                (int(suspended), suspended_seconds, job_id, number),
+            )
+
 
 def _dependents(rows: dict, job_id: int) -> List[int]:
     """Every job that depends on ``job_id``, directly or through others."""
@@ -654,7 +676,7 @@ def _scheduler_job(record: JobRecord) -> Job:
 
 def _job_from_row(db: sqlite3.Connection, row: sqlite3.Row) -> JobRecord:
     attempts = [
-        dict(attempt, cpus=json.loads(attempt["cpus"]))
+        dict(attempt, cpus=json.loads(attempt["cpus"]), suspended=bool(attempt["suspended"]))
         for attempt in db.execute("SELECT * FROM attempts WHERE job_id = ? ORDER BY number", (row["id"],))
     ]
     return JobRecord(
@@ -691,6 +713,7 @@ def _node_to_dict(node: Node) -> dict:
         "max_cores_per_job": node.max_cores_per_job,
         "max_pending": node.max_pending,
         "exclude": list(node.exclude),
+        "in_use": node.in_use,
     }
 
 
@@ -709,4 +732,5 @@ def _node_from_dict(data: dict) -> Node:
         max_cores_per_job=data["max_cores_per_job"],
         max_pending=data["max_pending"],
         exclude=tuple(data["exclude"]),
+        in_use=data.get("in_use"),  # absent in rows written by fila 0.1.0
     )

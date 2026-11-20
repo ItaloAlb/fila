@@ -112,6 +112,7 @@ class Node:
     max_cores_per_job: Optional[int] = None
     max_pending: int = 2
     exclude: Tuple[str, ...] = ()
+    in_use: Optional[bool] = None  # someone at the keyboard (section 6.5); None: unknown or a cluster
 
     def physical_cores(self) -> Tuple[Tuple[int, ...], ...]:
         """Logical CPU ids grouped by physical core; without a topology, one CPU per core."""

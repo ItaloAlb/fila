@@ -232,6 +232,9 @@ class Server:
             status = statuses[job.id]
             if status is None:
                 continue
+            if "suspended_seconds" in status:  # for fila top: frozen now, and time frozen so far
+                self.store.attempt_progress(job.id, attempt["number"], bool(status.get("suspended")),
+                                            float(status["suspended_seconds"]))
             if status["state"] == "lost":
                 self.store.finish(job.id, "failed", now, reason="lost")
                 continue
@@ -283,6 +286,7 @@ def node_view(entry: NodeEntry, probe: dict, drained: bool) -> tuple:
         speed=entry.speed,
         topology=tuple(tuple(core) for core in hardware["topology"]),
         default_hint=entry.default_hint,
+        in_use=in_use,
     )
     return view, in_use
 
@@ -310,7 +314,7 @@ def slurm_view(entry: NodeEntry, probe: dict, drained: bool) -> Node:
 def _unusable_view(entry: NodeEntry, previous: Optional[Node], state: str) -> Node:
     """Keep the last known capacity (a submit is checked against it) but take the node out."""
     if previous is not None:
-        return replace(previous, state=state, speed=entry.speed)
+        return replace(previous, state=state, speed=entry.speed, in_use=None)
     capacity = Resources(cores=entry.limits.get("cores", 0), mem=entry.limits.get("mem", 0))
     return Node(name=entry.name, capacity=capacity, probe_free=capacity, state=state, speed=entry.speed)
 

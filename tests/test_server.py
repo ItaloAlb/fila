@@ -280,6 +280,24 @@ class SuspendTest(ServerCase):
         self.fila("cancel", str(job_id))
         self.cycle_until(lambda: self.state(job_id) == "cancelled")
 
+    def test_the_database_follows_the_suspension_and_its_time(self):
+        # fila top shows suspended jobs and their elapsed time without the frozen part.
+        job_id = self.submit("import time\nfor i in range(600): time.sleep(0.05)")
+        self.cycle_until(lambda: self.attempt_state(job_id) == "running")
+        self.fila("suspend", str(job_id))
+        self.cycle_until(lambda: self.recorded(job_id)["suspended"])
+        time.sleep(0.5)
+
+        self.fila("resume", str(job_id))
+        self.cycle_until(lambda: not self.recorded(job_id)["suspended"])
+
+        self.assertGreater(self.recorded(job_id)["suspended_seconds"], 0.3)
+        self.fila("cancel", str(job_id))
+        self.cycle_until(lambda: self.state(job_id) == "cancelled")
+
+    def recorded(self, job_id):
+        return self.result(job_id)["attempts"][-1]
+
     def attempt_status(self, job_id):
         return read_status(os.path.join(self.entry.jobs_dir, str(job_id), "attempt-1")) or {}
 
@@ -313,6 +331,15 @@ class InUseTest(ServerCase):
 
         self.assertEqual(self.state(job_id), "pending")
         self.assertIn("kept as reserve", self.fila("explain", str(job_id))[1])
+
+    def test_the_node_records_whether_it_is_in_use(self):
+        self.assertIs(self.server.store.nodes()[0].in_use, True)
+        self.addCleanup(setattr, self.probe, "idle", self.probe.idle)  # the probe is shared by the class
+        self.probe.idle = 3600.0
+
+        self.server.cycle()
+
+        self.assertIs(self.server.store.nodes()[0].in_use, False)
 
 
 if __name__ == "__main__":
