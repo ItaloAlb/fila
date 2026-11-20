@@ -119,6 +119,8 @@ def main(
         return EXIT_USAGE
     on_this_machine = argv[:1] in (["internal"], ["worker"], ["mcp"], ["guide"]) or _local_top(argv)
     if client is not None and not on_this_machine:
+        if _interactive_top(argv):  # the screen runs on the coordinator, in this terminal (ssh -t)
+            return _forward_terminal(client, argv, err, environ)
         return _forward(client, argv, out, err, environ)  # the MCP server stays here; each tool call is forwarded
     try:
         args = _parser().parse_args(argv)
@@ -172,6 +174,26 @@ def _attach_values(argv: List[str]) -> List[str]:
 def _local_top(argv: List[str]) -> bool:
     """``fila top --local`` reads this machine's files only: never forwarded, no database opened."""
     return argv[:1] == ["top"] and "--local" in argv
+
+
+def _interactive_top(argv: List[str]) -> bool:
+    return argv[:1] == ["top"] and not {"--once", "--json", "--local"} & set(argv)
+
+
+def _forward_terminal(config: dict, argv: List[str], err: TextIO, environ: Mapping[str, str]) -> int:
+    """Section 4.5: an interactive command runs on the coordinator with this
+    terminal attached (``ssh -t``), so it opens one connection, not one per refresh."""
+    remote = config.get("remote_command", "fila") + " " + " ".join(shlex.quote(arg) for arg in argv)
+    try:
+        code = subprocess.call(list(config.get("ssh", ["ssh"])) + ["-t", config["coordinator"], remote],
+                               env=dict(environ))
+    except OSError as error:
+        err.write(f"fila: cannot start ssh: {error}\n")
+        return EXIT_UNAVAILABLE
+    if code == 255:
+        err.write(f"fila: cannot reach the coordinator {config['coordinator']}\n")
+        return EXIT_UNAVAILABLE
+    return code
 
 
 # --- Client mode (section 4.5) ---
@@ -288,6 +310,7 @@ def _parser() -> argparse.ArgumentParser:
 
     top = commands.add_parser("top", parents=[common], help="one view of the nodes and the jobs, like htop")
     top.add_argument("--once", action="store_true", help="print one screen and exit")
+    top.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes (default 2)")
     top.add_argument("--node", help="only this node and its jobs")
     top.add_argument("--all", action="store_true", help="include finished jobs")
     top.add_argument("--width", type=int, help="columns to draw (default: the terminal's width)")
@@ -541,26 +564,64 @@ def _top(ctx: Optional[Context], args: argparse.Namespace) -> int:
     screen; with ``--local``, what this node runs, from its own files."""
     from . import top
 
-    if not args.once:
-        raise UsageError("the interactive view is not available yet; use fila top --once")
     if not args.local and (args.jobs_dir or args.worker_dir):
         raise UsageError("--jobs-dir and --worker-dir go with --local")
+    if args.interval <= 0:
+        raise UsageError("--interval must be a positive number of seconds")
     if args.local:
         if args.node is not None:
             raise UsageError("--node is for the coordinator's view; --local shows this node")
         out = args.out
         worker_dir = os.path.expanduser(args.worker_dir or "~/.fila")
-        snapshot = top.collect_local(worker_dir, args.jobs_dir, time.time(), show_finished=args.all)
+        probe = _local_probe()
+
+        def fetch(show_finished: bool) -> dict:
+            return top.collect_local(worker_dir, args.jobs_dir, time.time(), probe=probe, show_finished=show_finished)
     else:
         out = ctx.out
-        general = ctx.registry.load()[0]
-        snapshot = top.collect(ctx.store, ctx.home, ctx.clock(), float(general["probe_interval_s"]),
-                               show_finished=args.all, node=args.node)
-    if args.json:
-        out.write(json.dumps(snapshot, indent=2) + "\n")
+        heartbeat_interval = float(ctx.registry.load()[0]["probe_interval_s"])
+
+        def fetch(show_finished: bool) -> dict:
+            return top.collect(ctx.store, ctx.home, ctx.clock(), heartbeat_interval, show_finished=show_finished,
+                               node=args.node)
+    if args.once or args.json:
+        snapshot = fetch(args.all)
+        if args.json:
+            out.write(json.dumps(snapshot, indent=2) + "\n")
+            return EXIT_OK
+        width = args.width or shutil.get_terminal_size((100, 24)).columns
+        out.write("\n".join(top.render(snapshot, width, charset=top.charset_for(out))) + "\n")
         return EXIT_OK
-    width = args.width or shutil.get_terminal_size((100, 24)).columns
-    out.write("\n".join(top.render(snapshot, width, charset=top.charset_for(out))) + "\n")
+    return _top_interactive(ctx, args, out, fetch)
+
+
+def _local_probe():
+    from .probe import LocalProbe
+
+    return LocalProbe()  # one for every refresh: on Windows the load comes from two samples
+
+
+def _top_interactive(ctx: Optional[Context], args: argparse.Namespace, out: TextIO, fetch) -> int:
+    """The refreshing screen (``terminal.run``): it needs this process's own terminal."""
+    from . import terminal, top
+    from .topview import View
+
+    if out is not sys.stdout or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise UsageError("the interactive view needs a terminal; use fila top --once (or --json)")
+
+    def ask(argv: List[str]) -> tuple:
+        captured, errors = io.StringIO(), io.StringIO()
+        try:
+            code = main(argv, home=ctx.home, stdout=captured, stderr=errors, environ=ctx.environ)
+        except Exception as error:  # a page shows the error; the screen stays up
+            return EXIT_FAILED, "", f"{type(error).__name__}: {error}"
+        return code, captured.getvalue(), errors.getvalue()
+
+    view = View(fetch, None if ctx is None else ask, local=args.local, interval=args.interval,
+                charset=top.charset_for(sys.stdout))
+    view.show_finished = args.all
+    with terminal.open_terminal() as screen:
+        terminal.run(view, screen, args.interval)
     return EXIT_OK
 
 

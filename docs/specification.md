@@ -927,8 +927,9 @@ fila run "<command>" --on <nodes|all|online> [...]       # the terminal, now (se
 fila submit [...] -- <command>                            # the queue (section 5.3)
 fila status [--state S] [--node N] [--all]                # queue, running jobs and node summary
 fila resources                                            # what each node has free now
-fila top --once [--node N] [--all] [--width W]            # nodes, jobs and why each waits, on one screen
-fila top --local --once [--jobs-dir D] [--all]            # on a node: what fila runs here, from its own files
+fila top [--interval S] [--node N] [--all]               # nodes, jobs and why each waits, refreshed (like htop)
+fila top --once [--width W] [--json]                      # one screen, and exit
+fila top --local [--jobs-dir D] [--once]                  # on a node: what fila runs here, from its own files
 fila guide                                                # the usage guide for an agent's instructions
 fila mcp [--register]                                     # the MCP server (stdio), or how to register it
 fila result <id>                                          # state, reason, code, node, attempts, directory, end of the log
@@ -964,8 +965,30 @@ time without the time it spent suspended, and, for a waiting job, the reason
 `explain` gives, in a few words. The header warns `server not running` when
 the coordinator's heartbeat is old; the view still shows the database. Columns
 shrink or disappear below about 80 columns, the command first. `--once` prints
-one screen and exits; with `--json` it prints the same snapshot as data. The
-interactive view (refresh, keys, actions) is not available yet.
+one screen and exits; with `--json` it prints the same snapshot as data.
+
+Without `--once`, the screen takes the terminal and is redrawn every
+`--interval` seconds (2 by default) and when the terminal is resized. It
+uses `curses` on Linux and macOS and, on Windows (whose Python has no
+`curses`), escape sequences with `msvcrt` for the keys; both come with the
+standard library. The keys (`?` lists them):
+
+| Key | Does |
+|---|---|
+| Up/Down, `j`/`k`, PgUp/PgDn, Home/End | move the selection (highlighted) |
+| Tab | switch between the job list and the node panel |
+| Enter | the job's `fila result`, or the node's details |
+| `l` | the end of the job's output, followed; Tab switches stdout/stderr |
+| `e` | the job's `fila explain` |
+| `f` | filter by node, state, name or command |
+| `a` | show or hide finished jobs |
+| `o` | order by id, state, node or elapsed time |
+| `q`, Esc | quit; on a page, back to the list |
+
+The pages show exactly what the command line prints, run in the same
+process. In client mode (section 4.5) the interactive screen runs on the
+coordinator through `ssh -t`, so it holds one connection instead of one per
+refresh; `--once` and `--json` are forwarded like any other command.
 
 **`top --local`.** The minimal view for whoever sits at a node, on any
 computer (`local`, `ssh` or `pull`), without the coordinator: nodes have no
@@ -979,7 +1002,10 @@ directories are those the worker recorded plus any `--jobs-dir`; an `ssh` node
 needs `--jobs-dir`. It is read only: cancelling, suspending and draining stay
 on the coordinator, because a suspension made on the node would be undone by
 the server at its next cycle and a cancellation must be recorded in the
-database. It is never forwarded in client mode.
+database. It is never forwarded in client mode. Without `--once` it refreshes
+like the full view; its keys are the moving ones, Enter (the attempt's
+`job.json` and `status.json`), `l` (its output, followed), `f`, `a`, `?` and
+`q`.
 
 **`wait`.** Blocks until every given job reaches a final state: `completed`,
 `failed`, `cancelled` or `blocked`. It only reads the local database, about once

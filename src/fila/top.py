@@ -227,24 +227,95 @@ def _local_elapsed(status: dict, state: str, now: float) -> Optional[float]:
 # --- Drawing ---
 
 
+MAIN_KEYS = ("[Enter] details  [l] log  [e] explain  [Tab] nodes/jobs",
+             "[f] filter  [a] show finished  [o] order")
+LOCAL_KEYS = ("[Enter] details  [l] log   actions (cancel, suspend, drain) are done on the coordinator",)
+
+
 def render(snapshot: dict, width: int, *, order: str = "id", text_filter: Optional[str] = None,
-           selected: Optional[int] = None, interval: Optional[float] = None, interactive: bool = False,
+           selected=None, interval: Optional[float] = None, interactive: bool = False,
            charset: Optional[dict] = None) -> List[str]:
-    """The screen as lines of at most ``width`` characters (40 or more)."""
-    chars = charset or UNICODE
+    """The whole screen as lines of at most ``width`` characters (40 or more).
+    ``selected`` is a job id, or ``(job, attempt)`` in the local view."""
     width = max(width, 40)
-    if snapshot.get("view") == "local":
-        return [_fit(line, width, chars) for line in _local_lines(snapshot, width, interval, interactive, chars)]
+    chars = charset or UNICODE
+    top, rows, bottom, _ = _parts(snapshot, width, order, text_filter, selected, None, interval, interactive, chars)
+    return [_fit(line, width, chars) for line in top + rows + bottom]
+
+
+def screen(snapshot: dict, width: int, height: int, *, order: str = "id", text_filter: Optional[str] = None,
+           selected=None, selected_node: Optional[str] = None, first_row: int = 0,
+           interval: Optional[float] = None, status: Optional[str] = None,
+           charset: Optional[dict] = None) -> tuple:
+    """The interactive screen in ``height`` lines: the job (or attempt) rows
+    start at ``first_row`` and fill what the header and the keys leave.
+    Returns (lines, index of the line to highlight or None, rows that fit).
+    ``status`` (a prompt, a message) replaces the last line of keys."""
+    width, height = max(width, 40), max(height, 5)
+    chars = charset or UNICODE
+    top, rows, bottom, marked = _parts(snapshot, width, order, text_filter, selected, selected_node, interval,
+                                       True, chars)
+    if status is not None:
+        bottom = bottom[:-1] + [status]
+    while bottom and len(top) + len(bottom) >= height:  # the keys go first when the terminal is short
+        bottom = bottom[1:]
+    fit_rows = max(1, height - len(top) - len(bottom))
+    shown = rows[first_row:first_row + fit_rows]
+    lines = (top + shown + [""] * (fit_rows - len(shown)) + bottom)[:height]
+    highlight = None
+    if marked is not None:
+        kind, index = marked
+        if kind == "top":
+            highlight = index
+        elif first_row <= index < first_row + fit_rows:
+            highlight = len(top) + index - first_row
+    return [_fit(line, width, chars) for line in lines], highlight, fit_rows
+
+
+def _parts(snapshot: dict, width: int, order: str, text_filter: Optional[str], selected, selected_node,
+           interval: Optional[float], interactive: bool, chars: dict) -> tuple:
+    """(fixed top lines, scrolling rows, key lines, ("top"|"row", index) of the selection)."""
     rule = chars["rule"] * width
-    lines = [_header(snapshot, width, interval, interactive, chars), rule]
-    lines += _node_lines(snapshot["nodes"], width, chars) or ["no nodes registered"]
-    lines.append(rule)
+    if snapshot.get("view") == "local":
+        top = _local_top(snapshot, width, interval, interactive, chars)
+        attempts = _filtered_attempts(snapshot["attempts"], text_filter)
+        table = _attempt_lines(attempts, width, chars, selected)
+        if not table:
+            table = ["", "no attempts here" if snapshot["jobs_dirs"] else "no jobs directory known: pass --jobs-dir"]
+        keys = [rule, *LOCAL_KEYS] if interactive else []
+        rows = table[1:]
+        marked = next((("row", i) for i, a in enumerate(attempts) if (a["job"], a["attempt"]) == selected), None)
+        return top + [line for line in table[:1] if line], rows, keys, marked
+    top = [_header(snapshot, width, interval, interactive, chars), rule]
+    node_lines = _node_lines(snapshot["nodes"], width, chars)
+    marked = None
+    if selected_node is not None:
+        names = [node["name"] for node in snapshot["nodes"]]
+        if selected_node in names:
+            marked = ("top", len(top) + 1 + names.index(selected_node))
+    top += (node_lines or ["no nodes registered"]) + [rule]
     jobs = _ordered(_filtered(snapshot["jobs"], text_filter), order)
-    lines += _job_lines(jobs, width, selected, chars) or ["no jobs"]
-    if interactive:
-        lines += [rule, "[Enter] details  [l] log  [e] explain  [c] cancel  [s/r] suspend/resume",
-                  "[d] drain node  [f] filter  [a] show finished  [o] order"]
-    return [_fit(line, width, chars) for line in lines]
+    table = _job_lines(jobs, width, selected, chars)
+    if marked is None and selected is not None:
+        marked = next((("row", i) for i, job in enumerate(jobs) if job["id"] == selected), None)
+    keys = [rule, *MAIN_KEYS] if interactive else []
+    if not table:
+        return top, ["no jobs"], keys, marked
+    return top + table[:1], table[1:], keys, marked
+
+
+def ordered_jobs(snapshot: dict, order: str = "id", text_filter: Optional[str] = None) -> List[dict]:
+    """The rows of the list in screen order: jobs, or attempts in the local view."""
+    if snapshot.get("view") == "local":
+        return _filtered_attempts(snapshot["attempts"], text_filter)
+    return _ordered(_filtered(snapshot["jobs"], text_filter), order)
+
+
+def _filtered_attempts(attempts: List[dict], text: Optional[str]) -> List[dict]:
+    if not text:
+        return list(attempts)
+    needle = text.lower()
+    return [a for a in attempts if needle in a["state"].lower() or needle in (a["command"] or "").lower()]
 
 
 def _header(snapshot: dict, width: int, interval: Optional[float], interactive: bool, chars: dict) -> str:
@@ -407,7 +478,8 @@ def _ordered(jobs: List[dict], order: str) -> List[dict]:
 # --- Drawing the node's own view ---
 
 
-def _local_lines(snapshot: dict, width: int, interval: Optional[float], interactive: bool, chars: dict) -> List[str]:
+def _local_top(snapshot: dict, width: int, interval: Optional[float], interactive: bool, chars: dict) -> List[str]:
+    """Header, channel and resources: the fixed part above the attempts."""
     rule = chars["rule"] * width
     parts = ["fila top --local", f"node {snapshot['node']}",
              datetime.datetime.fromtimestamp(snapshot["now"]).strftime("%H:%M:%S")]
@@ -420,12 +492,7 @@ def _local_lines(snapshot: dict, width: int, interval: Optional[float], interact
     lines = [header]
     if snapshot["channel"] is not None:
         lines.append(_channel_line(snapshot["channel"], snapshot["now"], chars))
-    lines += [rule, _resources_line(snapshot["resources"], width, chars), rule]
-    lines += _attempt_lines(snapshot["attempts"], width, chars) or [
-        "no attempts here" if snapshot["jobs_dirs"] else "no jobs directory known: pass --jobs-dir"]
-    if interactive:
-        lines += [rule, "[l] log  [q] quit   actions (cancel, suspend, drain) are done on the coordinator"]
-    return lines
+    return lines + [rule, _resources_line(snapshot["resources"], width, chars), rule]
 
 
 def _channel_line(channel: dict, now: float, chars: dict) -> str:
@@ -473,7 +540,8 @@ _ATTEMPT_COLUMNS = (("attempt", "ATTEMPT", 9), ("cpus", "CPUS", 12), ("mem", "ME
                     ("elapsed", "ELAPSED", 10))
 
 
-def _attempt_lines(attempts: List[dict], width: int, chars: dict) -> List[str]:
+def _attempt_lines(attempts: List[dict], width: int, chars: dict, selected=None) -> List[str]:
+    """The attempts table; ``selected`` is a ``(job, attempt)`` pair."""
     if not attempts:
         return []
     none = chars["none"]
@@ -484,6 +552,7 @@ def _attempt_lines(attempts: List[dict], width: int, chars: dict) -> List[str]:
         if not live:
             what += f"   ({_outcome(attempt)})"
         rows.append({
+            "marker": "> " if (attempt["job"], attempt["attempt"]) == selected else "  ",
             "job": str(attempt["job"]), "attempt": str(attempt["attempt"]), "state": attempt["state"],
             "cpus": _cpu_list(attempt["cpus"]) if live and attempt["cpus"] else none,
             "mem": _short_mem(attempt["mem_limit"]) if live and attempt["mem_limit"] else none,
@@ -496,11 +565,12 @@ def _attempt_lines(attempts: List[dict], width: int, chars: dict) -> List[str]:
         columns = [column for column in columns if column[0] not in ("mem", "elapsed")]
 
     def line(cells: Dict[str, str]) -> str:
-        text = "  " + cells["job"].rjust(job_width) + "  " + _cell(cells["attempt"], columns[0][2])
+        text = cells["marker"] + cells["job"].rjust(job_width) + "  " + _cell(cells["attempt"], columns[0][2])
         text += _cell(cells["state"], state_width)
         return text + "".join(_cell(cells[key], size) for key, _, size in columns[1:]) + cells["what"]
 
-    titles = dict({key: title for key, title, _ in _ATTEMPT_COLUMNS}, job="JOB", state="STATE", what="COMMAND")
+    titles = dict({key: title for key, title, _ in _ATTEMPT_COLUMNS}, job="JOB", state="STATE", what="COMMAND",
+                  marker="  ")
     return [line(titles)] + [line(row) for row in rows]
 
 

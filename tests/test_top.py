@@ -338,7 +338,7 @@ class OnceTest(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual((code, [n["name"] for n in data["nodes"]], data["jobs"]), (0, ["here"], []))
 
-    def test_without_once_it_says_the_interactive_view_is_not_there_yet(self):
+    def test_the_interactive_view_needs_a_terminal(self):  # here stdout is a StringIO
         code, _, err = self.fila("top")
 
         self.assertEqual(code, 5)
