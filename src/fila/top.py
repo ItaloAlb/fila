@@ -4,17 +4,24 @@
 """``fila top`` (section 11): one view of the nodes and the jobs, like ``htop``.
 
 ``collect`` reads a snapshot from the coordinator's database (what
-``resources``, ``status`` and ``explain`` show) into plain data; ``render``
-turns a snapshot into lines of text. ``render`` is pure, so ``--once``, the
-interactive view and the tests share it. Everything on screen is English.
+``resources``, ``status`` and ``explain`` show) into plain data;
+``collect_local`` reads the smaller snapshot a node has on its own (its probe,
+its attempts' journals and the worker's channel state) for ``--local``.
+``render`` turns either snapshot into lines of text. It is pure, so
+``--once``, the interactive view and the tests share it. Everything on screen
+is English.
 """
 
 from __future__ import annotations
 
 import datetime
+import os
 import socket
 from typing import Dict, List, Optional, Sequence, TextIO
 
+from . import supervisor
+from .channel import WORKER_STATE
+from .files import read_json
 from .scheduler import OCCUPYING, free_now, total
 from .server import server_alive
 from .store import Store
@@ -109,6 +116,114 @@ def _waiting(summary: str, details: Sequence[str]) -> str:
     return text + (f"; {reserved}" if reserved else "")
 
 
+# --- The node's own snapshot (--local) ---
+
+RECENT_S = 3600.0  # finished attempts shown without --all
+LIVE_STATES = ("starting", "running", "suspended")
+
+
+def collect_local(worker_dir: str, jobs_dirs: Sequence[str], now: float, probe=None, show_finished: bool = False,
+                  idle_minutes: float = 5.0) -> dict:
+    """What this node runs, from its own files only: no coordinator database
+    here. ``jobs_dirs`` adds to the ones the worker recorded in worker.json."""
+    from .probe import LocalProbe
+
+    worker = read_json(os.path.join(worker_dir, WORKER_STATE))
+    dirs = list(dict.fromkeys(list(jobs_dirs) + list((worker or {}).get("jobs_dirs", []))))
+    attempts = sorted((attempt for jobs_dir in dirs for attempt in _local_attempts(jobs_dir, now, show_finished)),
+                      key=lambda attempt: (attempt["job"], attempt["attempt"]))
+    source = probe or LocalProbe()
+    hardware, reading = source.hardware(), source.sample()
+    live = [attempt for attempt in attempts if attempt["state"] in LIVE_STATES]
+    idle = reading.idle_seconds
+    return {
+        "view": "local",
+        "node": (worker or {}).get("node") or socket.gethostname(),
+        "now": now,
+        "channel": _channel(worker),
+        "resources": {
+            "cores": hardware.logical_cpus, "cores_used": hardware.logical_cpus - reading.free_cores,
+            "cores_fila": sum(len(attempt["cpus"]) for attempt in live),
+            "mem": hardware.total_mem, "mem_used": hardware.total_mem - reading.available_mem,
+            "mem_fila": sum(attempt["mem_limit"] or 0 for attempt in live),
+            "in_use": None if idle is None or idle == float("inf") else idle < idle_minutes * 60,
+        },
+        "jobs_dirs": dirs,
+        "attempts": attempts,
+    }
+
+
+def _channel(worker: Optional[dict]) -> Optional[dict]:
+    """The worker's channel as worker.json says, or ``not running`` if its process is gone."""
+    if worker is None:
+        return None
+    state = worker.get("state")
+    if state != "stopped" and not supervisor.pid_alive(int(worker.get("pid") or 0)):
+        state = "not running"
+    return dict({key: worker.get(key) for key in ("coordinator", "heard_at", "retry_at", "reason")}, state=state)
+
+
+def _local_attempts(jobs_dir: str, now: float, show_finished: bool) -> List[dict]:
+    """Every ``<jobs_dir>/<job>/attempt-<n>/`` journal: live ones always,
+    finished or lost ones of the last hour (all of them with ``show_finished``)."""
+    root = os.path.expanduser(jobs_dir)
+    try:
+        jobs = [name for name in os.listdir(root) if name.isdigit()]
+    except OSError:
+        return []
+    found = []
+    for job in jobs:
+        try:
+            attempts = [name for name in os.listdir(os.path.join(root, job))
+                        if name.startswith("attempt-") and name[len("attempt-"):].isdigit()]
+        except OSError:
+            continue
+        for name in attempts:
+            entry = _local_attempt(os.path.join(root, job, name), int(job), int(name[len("attempt-"):]), now)
+            recent = entry["ended_at"] is not None and now - entry["ended_at"] <= RECENT_S
+            if entry["state"] in LIVE_STATES or show_finished or recent:
+                found.append(dict(entry, jobs_dir=jobs_dir))
+    return found
+
+
+def _local_attempt(directory: str, job: int, attempt: int, now: float) -> dict:
+    spec = read_json(os.path.join(directory, supervisor.SPEC)) or {}
+    status = supervisor.read_status(directory)
+    if status is None:  # job.json written, the supervisor not started yet
+        state, status = "starting", {}
+    else:
+        state = status["state"]
+        if state != "finished" and not supervisor.pid_alive(int(status.get("supervisor_pid") or 0)):
+            status = supervisor.read_status(directory) or status  # it may have finished just now
+            state = status["state"] if status["state"] == "finished" else "lost"
+        elif state == "running" and status.get("suspended"):
+            state = "suspended"
+    ended_at = status.get("finished_at")
+    if state == "lost":  # no end time: the last write of its journal stands for it
+        try:
+            ended_at = os.path.getmtime(os.path.join(directory, supervisor.STATUS))
+        except OSError:
+            ended_at = None
+    return {
+        "job": job, "attempt": attempt, "state": state, "command": spec.get("command", ""),
+        "cpus": list(spec.get("cpus") or []), "mem_limit": spec.get("mem"),
+        "elapsed": _local_elapsed(status, state, now), "exit_code": status.get("exit_code"),
+        "reason": status.get("reason"), "ended_at": ended_at,
+    }
+
+
+def _local_elapsed(status: dict, state: str, now: float) -> Optional[float]:
+    """Running time on this machine's clock, without the time spent suspended."""
+    started = status.get("started_at")
+    if started is None:
+        return None
+    end = status.get("finished_at") or now
+    frozen = float(status.get("suspended_seconds") or 0.0)
+    if state == "suspended" and status.get("suspended_since"):
+        frozen += max(0.0, now - status["suspended_since"])
+    return max(0.0, end - started - frozen)
+
+
 # --- Drawing ---
 
 
@@ -118,6 +233,8 @@ def render(snapshot: dict, width: int, *, order: str = "id", text_filter: Option
     """The screen as lines of at most ``width`` characters (40 or more)."""
     chars = charset or UNICODE
     width = max(width, 40)
+    if snapshot.get("view") == "local":
+        return [_fit(line, width, chars) for line in _local_lines(snapshot, width, interval, interactive, chars)]
     rule = chars["rule"] * width
     lines = [_header(snapshot, width, interval, interactive, chars), rule]
     lines += _node_lines(snapshot["nodes"], width, chars) or ["no nodes registered"]
@@ -285,6 +402,130 @@ def _ordered(jobs: List[dict], order: str) -> List[dict]:
     if order == "elapsed":
         return sorted(jobs, key=lambda job: (job["elapsed"] is None, -(job["elapsed"] or 0.0), job["id"]))
     return sorted(jobs, key=lambda job: job["id"])
+
+
+# --- Drawing the node's own view ---
+
+
+def _local_lines(snapshot: dict, width: int, interval: Optional[float], interactive: bool, chars: dict) -> List[str]:
+    rule = chars["rule"] * width
+    parts = ["fila top --local", f"node {snapshot['node']}",
+             datetime.datetime.fromtimestamp(snapshot["now"]).strftime("%H:%M:%S")]
+    if interval is not None:
+        parts.append(f"refresh {interval:g} s")
+    header = f" {chars['sep']} ".join(parts)
+    if interactive:
+        right = "q quit  ? help"
+        header += " " * max(width - len(header) - len(right), 1) + right
+    lines = [header]
+    if snapshot["channel"] is not None:
+        lines.append(_channel_line(snapshot["channel"], snapshot["now"], chars))
+    lines += [rule, _resources_line(snapshot["resources"], width, chars), rule]
+    lines += _attempt_lines(snapshot["attempts"], width, chars) or [
+        "no attempts here" if snapshot["jobs_dirs"] else "no jobs directory known: pass --jobs-dir"]
+    if interactive:
+        lines += [rule, "[l] log  [q] quit   actions (cancel, suspend, drain) are done on the coordinator"]
+    return lines
+
+
+def _channel_line(channel: dict, now: float, chars: dict) -> str:
+    sep, state, coordinator = f" {chars['sep']} ", channel["state"], channel["coordinator"]
+    if state == "connected":
+        heard = channel["heard_at"]
+        return f"channel: connected to {coordinator}" + ("" if heard is None else f"{sep}heard {_ago(now - heard)} ago")
+    if state == "connecting":
+        return f"channel: connecting to {coordinator}"
+    if state == "waiting":
+        text = f"channel: cannot reach {coordinator}"
+        if channel["retry_at"] is not None:
+            text += f"{sep}retry in {_ago(channel['retry_at'] - now)}"
+        return text + (f"{sep}{channel['reason']}" if channel["reason"] else "")
+    if state == "stopped":
+        return f"channel: worker stopped (coordinator {coordinator})"
+    return f"channel: worker not running (coordinator {coordinator})"
+
+
+def _ago(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 120:
+        return f"{seconds} s"
+    if seconds < 7200:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600} h"
+
+
+def _resources_line(resources: dict, width: int, chars: dict) -> str:
+    """CORES and MEMORY bars (fila's attempts, other use, free) and IN USE, as wide as fits."""
+    in_use = chars["none"] if resources["in_use"] is None else ("yes" if resources["in_use"] else "no")
+    cores, mem = resources["cores"], resources["mem"]
+    line = ""
+    for core_bar, mem_bar in ((20, 14), (12, 10), (8, 6), (4, 4)):
+        cores_bar = _bar(cores, resources["cores_fila"], resources["cores_used"], core_bar, chars)
+        mem_text = _bar(mem, resources["mem_fila"], resources["mem_used"], mem_bar, chars)
+        line = (f"CORES  {cores_bar}  {resources['cores_used']}/{cores} used    "
+                f"MEMORY  {mem_text}  {_mem_pair(resources['mem_used'], mem)}   IN USE  {in_use}")
+        if len(line) <= width:
+            break
+    return line
+
+
+_ATTEMPT_COLUMNS = (("attempt", "ATTEMPT", 9), ("cpus", "CPUS", 12), ("mem", "MEM LIMIT", 11),
+                    ("elapsed", "ELAPSED", 10))
+
+
+def _attempt_lines(attempts: List[dict], width: int, chars: dict) -> List[str]:
+    if not attempts:
+        return []
+    none = chars["none"]
+    rows = []
+    for attempt in attempts:
+        live = attempt["state"] in LIVE_STATES
+        what = attempt["command"]
+        if not live:
+            what += f"   ({_outcome(attempt)})"
+        rows.append({
+            "job": str(attempt["job"]), "attempt": str(attempt["attempt"]), "state": attempt["state"],
+            "cpus": _cpu_list(attempt["cpus"]) if live and attempt["cpus"] else none,
+            "mem": _short_mem(attempt["mem_limit"]) if live and attempt["mem_limit"] else none,
+            "elapsed": none if attempt["elapsed"] is None else _clock(attempt["elapsed"]), "what": what,
+        })
+    job_width = max(3, max(len(row["job"]) for row in rows))
+    state_width = max(11, max(len(row["state"]) for row in rows) + 2)
+    columns = list(_ATTEMPT_COLUMNS)
+    if 2 + job_width + 2 + state_width + sum(size for _, _, size in columns) + _MIN_COMMAND > width:
+        columns = [column for column in columns if column[0] not in ("mem", "elapsed")]
+
+    def line(cells: Dict[str, str]) -> str:
+        text = "  " + cells["job"].rjust(job_width) + "  " + _cell(cells["attempt"], columns[0][2])
+        text += _cell(cells["state"], state_width)
+        return text + "".join(_cell(cells[key], size) for key, _, size in columns[1:]) + cells["what"]
+
+    titles = dict({key: title for key, title, _ in _ATTEMPT_COLUMNS}, job="JOB", state="STATE", what="COMMAND")
+    return [line(titles)] + [line(row) for row in rows]
+
+
+def _outcome(attempt: dict) -> str:
+    if attempt["state"] == "lost":
+        return "lost"
+    reason, code = attempt["reason"], attempt["exit_code"]
+    if reason in (None, "exit_code") and code is not None:
+        return f"exit {code}"
+    return reason or "ended"
+
+
+def _cpu_list(cpus: Sequence[int]) -> str:
+    """``0-3,8,9``: runs of three or more CPUs as ranges."""
+    parts, ordered, start = [], sorted(cpus), 0
+    while start < len(ordered):
+        end = start
+        while end + 1 < len(ordered) and ordered[end + 1] == ordered[end] + 1:
+            end += 1
+        if end - start >= 2:
+            parts.append(f"{ordered[start]}-{ordered[end]}")
+        else:
+            parts.extend(str(cpu) for cpu in ordered[start:end + 1])
+        start = end + 1
+    return ",".join(parts)
 
 
 def _cell(text: str, size: int) -> str:

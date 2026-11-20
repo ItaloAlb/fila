@@ -62,6 +62,7 @@ def supervise(attempt_dir: str, poll_s: float = 0.5) -> dict:
     status = {
         "state": "starting", "supervisor_pid": os.getpid(), "pid": None, "started_at": None,
         "finished_at": None, "exit_code": None, "reason": None, "suspended": False, "suspended_seconds": 0.0,
+        "suspended_since": None,  # this machine's clock; suspended_seconds counts only finished suspensions
     }
     _write_status(attempt_dir, status)
     try:
@@ -100,7 +101,10 @@ def supervise(attempt_dir: str, poll_s: float = 0.5) -> dict:
             err.write(f"fila: cannot start {spec['shell']}: {error}\n")
     finally:
         group.close()
-    status.update(state="finished", finished_at=time.time(), exit_code=exit_code, reason=reason, suspended=False)
+    if status.get("suspended_since"):  # it ended while frozen (a cancel): that suspension counts too
+        status["suspended_seconds"] += time.time() - status["suspended_since"]
+    status.update(state="finished", finished_at=time.time(), exit_code=exit_code, reason=reason, suspended=False,
+                  suspended_since=None)
     _write_status(attempt_dir, status)
     _notify(spec)
     return status
@@ -133,13 +137,13 @@ def _watch(attempt_dir: str, spec: dict, status: dict, group, process, poll_s: f
         if want_suspended and suspended_since is None:
             group.suspend()
             suspended_since = time.time()
-            status["suspended"] = True
+            status.update(suspended=True, suspended_since=suspended_since)
             _write_status(attempt_dir, status)
         elif not want_suspended and suspended_since is not None:
             group.resume()
             status["suspended_seconds"] += time.time() - suspended_since
             suspended_since = None
-            status["suspended"] = False
+            status.update(suspended=False, suspended_since=None)
             _write_status(attempt_dir, status)
         if time_limit is not None and suspended_since is None:
             if time.time() - status["started_at"] - status["suspended_seconds"] > time_limit:

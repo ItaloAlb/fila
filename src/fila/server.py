@@ -233,8 +233,8 @@ class Server:
             if status is None:
                 continue
             if "suspended_seconds" in status:  # for fila top: frozen now, and time frozen so far
-                self.store.attempt_progress(job.id, attempt["number"], bool(status.get("suspended")),
-                                            float(status["suspended_seconds"]))
+                frozen = float(status["suspended_seconds"]) + float(status.get("suspended_for") or 0.0)
+                self.store.attempt_progress(job.id, attempt["number"], bool(status.get("suspended")), frozen)
             if status["state"] == "lost":
                 self.store.finish(job.id, "failed", now, reason="lost")
                 continue

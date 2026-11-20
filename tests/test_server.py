@@ -287,6 +287,8 @@ class SuspendTest(ServerCase):
         self.fila("suspend", str(job_id))
         self.cycle_until(lambda: self.recorded(job_id)["suspended"])
         time.sleep(0.5)
+        self.server.cycle()
+        self.assertGreater(self.recorded(job_id)["suspended_seconds"], 0.3)  # the ongoing suspension counts
 
         self.fila("resume", str(job_id))
         self.cycle_until(lambda: not self.recorded(job_id)["suspended"])

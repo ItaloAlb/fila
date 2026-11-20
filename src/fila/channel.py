@@ -36,6 +36,7 @@ from typing import BinaryIO, Callable, List, Optional
 from . import __version__, agent
 from .errors import AgentError, NodeUnreachable
 from .executor import Executor
+from .files import read_json, write_json
 
 HEARTBEAT_S = 15.0
 DEAD_AFTER_S = 45.0
@@ -110,6 +111,56 @@ def serve_channel(store, node: str, stdin: BinaryIO, stdout: BinaryIO, wake_path
 # --- The node's end ---
 
 
+WORKER_STATE = "worker.json"
+_HEARD_WRITE_S = 5.0  # how stale "heard_at" in worker.json may get while connected
+
+
+class WorkerState:
+    """``<home_dir>/worker.json``, for ``fila top --local`` on the node (section 11):
+    the coordinator, the channel's state (``connecting``, ``connected``,
+    ``waiting`` with ``retry_at`` and ``reason``, ``stopped``), when the
+    coordinator was last heard, and every ``jobs_dir`` the requests named."""
+
+    def __init__(self, home_dir: str, coordinator: str, node: str) -> None:
+        self.path = os.path.join(home_dir, WORKER_STATE)
+        previous = read_json(self.path) or {}
+        self.data = {
+            "coordinator": coordinator, "node": node, "pid": os.getpid(), "state": "connecting",
+            "heard_at": None, "retry_at": None, "reason": None, "updated_at": None,
+            "jobs_dirs": list(previous.get("jobs_dirs", [])) if previous.get("node") == node else [],
+        }
+        self.lock = threading.Lock()
+        self.written = 0.0
+
+    def update(self, **fields) -> None:
+        with self.lock:
+            self.data.update(fields)
+            self._write()
+
+    def heard(self) -> None:
+        now = time.time()
+        with self.lock:
+            self.data["heard_at"] = now
+            if self.data["state"] != "connected":
+                self.data.update(state="connected", retry_at=None, reason=None)
+                self._write()
+            elif now - self.written > _HEARD_WRITE_S:
+                self._write()
+
+    def saw_jobs_dir(self, jobs_dir: str) -> None:
+        with self.lock:
+            if jobs_dir not in self.data["jobs_dirs"]:
+                self.data["jobs_dirs"].append(jobs_dir)
+                self._write()
+
+    def _write(self) -> None:
+        self.data["updated_at"] = self.written = time.time()
+        try:
+            write_json(self.path, self.data)
+        except OSError:  # the view is a convenience: never let it stop the worker
+            pass
+
+
 def run_worker(coordinator: str, node: str, ssh_command: List[str], remote_command: str = "fila",
                stop: Optional[threading.Event] = None, home_dir: Optional[str] = None,
                on_install: Optional[Callable[[], None]] = None, log=None) -> None:
@@ -118,21 +169,28 @@ def run_worker(coordinator: str, node: str, ssh_command: List[str], remote_comma
     stop = stop or threading.Event()
     home_dir = home_dir or os.path.expanduser("~/.fila")
     log = log or sys.stderr
+    os.makedirs(home_dir, exist_ok=True)
+    state = WorkerState(home_dir, coordinator, node)
     failures = 0
-    while not stop.is_set():
-        started = time.time()
-        reason = _session(coordinator, node, ssh_command, remote_command, stop, home_dir, on_install)
-        if stop.is_set():
-            return
-        failures = 0 if time.time() - started > 60 else failures + 1
-        delay = RECONNECT_DELAYS_S[min(max(failures, 1), len(RECONNECT_DELAYS_S)) - 1]
-        log.write(f"fila worker {time.strftime('%Y-%m-%d %H:%M:%S')}: channel closed ({reason}); retrying in {delay} s\n")
-        log.flush()
-        stop.wait(delay)
+    try:
+        while not stop.is_set():
+            started = time.time()
+            state.update(state="connecting", retry_at=None)
+            reason = _session(coordinator, node, ssh_command, remote_command, stop, home_dir, on_install, state)
+            if stop.is_set():
+                return
+            failures = 0 if time.time() - started > 60 else failures + 1
+            delay = RECONNECT_DELAYS_S[min(max(failures, 1), len(RECONNECT_DELAYS_S)) - 1]
+            state.update(state="waiting", retry_at=time.time() + delay, reason=reason)
+            log.write(f"fila worker {time.strftime('%Y-%m-%d %H:%M:%S')}: channel closed ({reason}); retrying in {delay} s\n")
+            log.flush()
+            stop.wait(delay)
+    finally:
+        state.update(state="stopped", retry_at=None)
 
 
 def _session(coordinator: str, node: str, ssh_command: List[str], remote_command: str,
-             stop: threading.Event, home_dir: str, on_install) -> str:
+             stop: threading.Event, home_dir: str, on_install, state: Optional[WorkerState] = None) -> str:
     os.makedirs(home_dir, exist_ok=True)
     wake_file = os.path.join(home_dir, "wake")
     command = f"{remote_command} internal channel --node {shlex.quote(node)}"
@@ -158,6 +216,8 @@ def _session(coordinator: str, node: str, ssh_command: List[str], remote_command
 
     def answer(message: dict) -> None:
         operation, args = message.get("operation"), dict(message.get("args") or {})
+        if state is not None and isinstance(args.get("jobs_dir"), str):
+            state.saw_jobs_dir(args["jobs_dir"])  # where fila top --local finds this node's attempts
         try:
             if operation == "install_agent":
                 path = os.path.join(home_dir, "fila.pyz")
@@ -196,6 +256,8 @@ def _session(coordinator: str, node: str, ssh_command: List[str], remote_command
     try:
         for raw in process.stdout:
             heard[0] = time.time()
+            if state is not None:
+                state.heard()
             try:
                 message = json.loads(raw.decode("utf-8"))
             except ValueError:

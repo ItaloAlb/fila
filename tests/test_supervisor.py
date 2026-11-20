@@ -213,6 +213,8 @@ class ControlTest(SupervisorCase):
 
         request(self.attempt, "suspend")
         self.wait_for(lambda: read_status(self.attempt).get("suspended"))
+        since = read_status(self.attempt)["suspended_since"]  # fila top counts the ongoing suspension from it
+        self.assertLessEqual(abs(time.time() - since), 5.0)
         time.sleep(0.3)
         frozen = self.counter()
         time.sleep(0.6)
@@ -220,6 +222,7 @@ class ControlTest(SupervisorCase):
 
         request(self.attempt, "resume")
         self.wait_for(lambda: self.counter() > frozen + 2)
+        self.assertIsNone(read_status(self.attempt)["suspended_since"])
         request(self.attempt, "cancel")
 
     def test_suspended_time_does_not_count_toward_the_limit(self):

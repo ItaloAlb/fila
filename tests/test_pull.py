@@ -19,6 +19,7 @@ from unittest import mock
 
 from fila.channel import run_worker
 from fila.cli import main
+from fila.files import read_json
 from fila.registry import Registry
 from fila.server import Server
 from fila.store import Store
@@ -180,6 +181,23 @@ class PullJobTest(PullCase):
         self.start_worker()
         self.cycle_until(lambda: self.state(job_id) == "completed")
 
+    def test_the_worker_says_where_its_channel_stands_and_top_local_reads_it(self):
+        job_id = self.submit("echo hi")
+        self.cycle_until(lambda: self.state(job_id) == "completed")
+
+        state = read_json(os.path.join(self.node_dir, "worker.json"))
+        self.assertEqual((state["coordinator"], state["node"], state["state"]), ("user@lab", "desktop", "connected"))
+        self.assertIn(self.jobs_dir, state["jobs_dirs"])
+        self.assertLess(time.time() - state["heard_at"], 60)
+        out = io.StringIO()
+        code = main(["top", "--local", "--once", "--worker-dir", self.node_dir, "--width", "100"],
+                    stdout=out, stderr=io.StringIO())
+        lines = out.getvalue().splitlines()
+        self.assertEqual(code, 0)
+        self.assertIn("node desktop", lines[0])
+        self.assertTrue(lines[1].startswith("channel: connected to user@lab"), lines[1])
+        self.assertTrue(any(line.split()[:3] == [str(job_id), "1", "finished"] for line in lines), lines)
+
     def test_nodes_update_sends_the_agent_through_the_channel(self):
         code, _, err = self.fila("nodes", "update", "desktop")
 
@@ -189,6 +207,34 @@ class PullJobTest(PullCase):
             time.sleep(0.2)
         self.assertEqual(self.installs, [1])
         self.assertTrue(os.path.exists(os.path.join(self.node_dir, "fila.pyz")))
+
+
+class WorkerStateTest(unittest.TestCase):
+    """``~/.fila/worker.json`` while the worker cannot reach the coordinator, and after it stops."""
+
+    def test_a_failing_session_leaves_the_worker_waiting_then_stopped(self):
+        home = tempfile.mkdtemp(prefix="fila-node-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        path = os.path.join(home, "worker.json")
+        stop = threading.Event()
+        failing_ssh = [sys.executable, "-c", "import sys; sys.exit(255)"]
+        thread = threading.Thread(target=run_worker, args=("user@lab", "desktop", failing_ssh),
+                                  kwargs=dict(stop=stop, home_dir=home, log=io.StringIO()), daemon=True)
+        thread.start()
+        deadline = time.time() + 20
+        while (read_json(path) or {}).get("state") != "waiting":
+            self.assertLess(time.time(), deadline, read_json(path))
+            time.sleep(0.05)
+
+        state = read_json(path)
+        self.assertEqual((state["coordinator"], state["node"], state["pid"]), ("user@lab", "desktop", os.getpid()))
+        self.assertIn("255", state["reason"])
+        self.assertLessEqual(state["retry_at"] - time.time(), 5.0)
+        self.assertIsNone(state["heard_at"])
+
+        stop.set()
+        thread.join(10)
+        self.assertEqual(read_json(path)["state"], "stopped")
 
 
 if __name__ == "__main__":

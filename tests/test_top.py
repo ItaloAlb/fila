@@ -345,5 +345,215 @@ class OnceTest(unittest.TestCase):
         self.assertIn("--once", err)
 
 
+# --- The node's own view (fila top --local) ---
+
+
+def local_snapshot(channel="connected", attempts=None, jobs_dirs=("/jobs",)):
+    channels = {
+        "connected": {"coordinator": "user@lab", "state": "connected", "heard_at": NOW - 3, "retry_at": None,
+                      "reason": None},
+        "waiting": {"coordinator": "user@lab", "state": "waiting", "heard_at": None, "retry_at": NOW + 25,
+                    "reason": "ssh exited with 255"},
+        "not running": {"coordinator": "user@lab", "state": "not running", "heard_at": NOW - 900, "retry_at": None,
+                        "reason": None},
+        None: None,
+    }
+    if attempts is None:
+        attempts = [
+            local_attempt(42, cpus=[0, 1, 2, 3], mem=8 * GiB, elapsed=4353.0, command="./build/alea configs/x.yaml"),
+            local_attempt(45, state="suspended", cpus=[4, 5], mem=2 * GiB, elapsed=602.0, command="./bench"),
+            local_attempt(40, attempt=2, state="finished", elapsed=190.0, command="echo ok", exit_code=0),
+        ]
+    return {"view": "local", "node": "desktop", "now": NOW, "channel": channels[channel],
+            "resources": {"cores": 28, "cores_used": 6, "cores_fila": 6, "mem": 16 * GiB, "mem_used": 9 * GiB,
+                          "mem_fila": 10 * GiB, "in_use": False},
+            "jobs_dirs": list(jobs_dirs), "attempts": attempts}
+
+
+def local_attempt(job, attempt=1, state="running", cpus=(), mem=None, elapsed=None, command="./run", exit_code=None,
+                  reason=None):
+    return {"job": job, "attempt": attempt, "state": state, "command": command, "cpus": list(cpus), "mem_limit": mem,
+            "elapsed": elapsed, "exit_code": exit_code, "reason": reason, "ended_at": None, "jobs_dir": "/jobs"}
+
+
+class LocalRenderTest(unittest.TestCase):
+    def test_the_screen_shows_the_node_its_channel_resources_and_attempts(self):
+        lines = top.render(local_snapshot(), 100)
+
+        self.assertTrue(lines[0].startswith("fila top --local · node desktop · 18:42:07"), lines[0])
+        self.assertEqual(lines[1], "channel: connected to user@lab · heard 3 s ago")
+        self.assertIn("6/28 used", lines[3])
+        self.assertIn("9.0/16.0G", lines[3])
+        self.assertTrue(lines[3].endswith("IN USE  no"), lines[3])
+        self.assertEqual(lines[5], "  JOB  ATTEMPT  STATE      CPUS        MEM LIMIT  ELAPSED   COMMAND")
+        self.assertEqual(lines[6].split(), ["42", "1", "running", "0-3", "8G", "01:12:33", "./build/alea", "configs/x.yaml"])
+        self.assertEqual(lines[7].split()[:4], ["45", "1", "suspended", "4,5"])
+        self.assertEqual(lines[8].split()[:5], ["40", "2", "finished", "—", "—"])
+        self.assertTrue(lines[8].endswith("echo ok   (exit 0)"), lines[8])
+
+    def test_channel_states(self):
+        self.assertEqual(top.render(local_snapshot("waiting"), 100)[1],
+                         "channel: cannot reach user@lab · retry in 25 s · ssh exited with 255")
+        self.assertEqual(top.render(local_snapshot("not running"), 100)[1],
+                         "channel: worker not running (coordinator user@lab)")
+        self.assertTrue(top.render(local_snapshot(None), 100)[1].startswith("─"))  # no channel line
+
+    def test_outcomes_of_ended_attempts(self):
+        attempts = [local_attempt(1, state="finished", exit_code=3, reason="exit_code"),
+                    local_attempt(2, state="finished", reason="timeout"),
+                    local_attempt(3, state="lost")]
+
+        rows = top.render(local_snapshot(attempts=attempts), 100)[-3:]
+
+        self.assertEqual([row.rsplit("(", 1)[1] for row in rows], ["exit 3)", "timeout)", "lost)"])
+
+    def test_without_attempts_it_says_why(self):
+        self.assertEqual(top.render(local_snapshot(attempts=[]), 80)[-1], "no attempts here")
+        self.assertEqual(top.render(local_snapshot(attempts=[], jobs_dirs=()), 80)[-1],
+                         "no jobs directory known: pass --jobs-dir")
+
+    def test_interactive_footer_says_actions_belong_to_the_coordinator(self):
+        lines = top.render(local_snapshot(), 100, interactive=True, interval=2)
+
+        self.assertTrue(lines[0].endswith("q quit  ? help"))
+        self.assertIn("refresh 2 s", lines[0])
+        self.assertIn("are done on the coordinator", lines[-1])
+
+    def test_it_fits_any_width_and_stays_english(self):
+        for width in (40, 60, 80, 100, 140):
+            with self.subTest(width=width):
+                lines = top.render(local_snapshot(), width, interactive=True, interval=2)
+
+                self.assertTrue(all(len(line) <= width for line in lines))
+                for line in lines:
+                    self.assertTrue(all(char.isascii() or char in DRAWING for char in line), line)
+
+    def test_cpu_lists(self):
+        self.assertEqual(top._cpu_list([0, 1, 2, 3, 8, 9]), "0-3,8,9")
+        self.assertEqual(top._cpu_list([5, 4]), "4,5")
+        self.assertEqual(top._cpu_list([0, 2, 3, 4, 7]), "0,2-4,7")
+
+
+class LocalProbe:
+    def hardware(self):
+        from fila.probe import Hardware
+
+        return Hardware(logical_cpus=28, topology=tuple((cpu,) for cpu in range(28)), total_mem=16 * GiB)
+
+    def sample(self):
+        from fila.probe import Reading
+
+        return Reading(free_cores=22, available_mem=7 * GiB, idle_seconds=3600.0)
+
+
+class LocalCollectTest(unittest.TestCase):
+    """Journals and a worker.json written by hand, as a supervisor and a worker would."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="fila-local-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.worker_dir = os.path.join(self.root, "dot-fila")
+        self.jobs_dir = os.path.join(self.root, "jobs")
+        os.makedirs(self.worker_dir)
+        self.now = time.time()
+        self.alive = os.getpid()
+        self.dead = self.exited_pid()
+
+    def exited_pid(self):
+        import subprocess
+
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait()
+        return process.pid
+
+    def journal(self, job, attempt, spec, status=None):
+        directory = os.path.join(self.jobs_dir, str(job), f"attempt-{attempt}")
+        os.makedirs(directory)
+        with open(os.path.join(directory, "job.json"), "w") as handle:
+            json.dump(dict({"command": "./run", "cpus": [], "mem": None}, **spec), handle)
+        if status is not None:
+            with open(os.path.join(directory, "status.json"), "w") as handle:
+                json.dump(dict({"supervisor_pid": self.alive, "suspended": False, "suspended_seconds": 0.0,
+                                "suspended_since": None, "finished_at": None, "exit_code": None, "reason": None},
+                               **status), handle)
+
+    def worker(self, **fields):
+        data = dict(coordinator="user@lab", node="desktop", pid=self.alive, state="connected",
+                    heard_at=self.now - 3, retry_at=None, reason=None, jobs_dirs=[self.jobs_dir])
+        data.update(fields)
+        with open(os.path.join(self.worker_dir, "worker.json"), "w") as handle:
+            json.dump(data, handle)
+
+    def collect(self, jobs_dirs=(), **options):
+        return top.collect_local(self.worker_dir, list(jobs_dirs), self.now, probe=LocalProbe(), **options)
+
+    def test_running_suspended_starting_lost_and_recently_finished_attempts(self):
+        n = self.now
+        self.journal(42, 1, {"command": "./sim", "cpus": [0, 1, 2, 3], "mem": 8 * GiB},
+                     {"state": "running", "started_at": n - 4353})
+        self.journal(45, 1, {"cpus": [4, 5], "mem": 2 * GiB},
+                     {"state": "running", "started_at": n - 612, "suspended": True, "suspended_since": n - 8,
+                      "suspended_seconds": 2.0})
+        self.journal(46, 1, {})  # the supervisor has not written yet
+        self.journal(40, 2, {"command": "echo ok"},
+                     {"state": "finished", "started_at": n - 250, "finished_at": n - 60, "exit_code": 0})
+        self.journal(39, 1, {}, {"state": "finished", "started_at": n - 9000, "finished_at": n - 8000, "exit_code": 0})
+        self.journal(38, 1, {}, {"state": "running", "started_at": n - 100, "supervisor_pid": self.dead})
+        os.makedirs(os.path.join(self.jobs_dir, "notes"))
+        os.makedirs(os.path.join(self.jobs_dir, "41", "attempt-x"))
+        self.worker()
+
+        data = self.collect()
+
+        found = {(a["job"], a["attempt"]): a for a in data["attempts"]}
+        self.assertEqual(sorted(found), [(38, 1), (40, 2), (42, 1), (45, 1), (46, 1)])  # 39 ended two hours ago
+        self.assertEqual({key: a["state"] for key, a in found.items()},
+                         {(38, 1): "lost", (40, 2): "finished", (42, 1): "running", (45, 1): "suspended",
+                          (46, 1): "starting"})
+        self.assertAlmostEqual(found[(42, 1)]["elapsed"], 4353.0, delta=1)
+        self.assertAlmostEqual(found[(45, 1)]["elapsed"], 602.0, delta=1)  # 612 s minus 2 + 8 s frozen
+        self.assertAlmostEqual(found[(40, 2)]["elapsed"], 190.0, delta=1)
+        self.assertEqual((data["node"], data["channel"]["state"], data["channel"]["coordinator"]),
+                         ("desktop", "connected", "user@lab"))
+        self.assertEqual(data["resources"], {"cores": 28, "cores_used": 6, "cores_fila": 6, "mem": 16 * GiB,
+                                             "mem_used": 9 * GiB, "mem_fila": 10 * GiB, "in_use": False})
+        self.assertIn((39, 1), {(a["job"], a["attempt"]) for a in self.collect(show_finished=True)["attempts"]})
+        json.dumps(data)
+
+    def test_a_dead_worker_is_not_running_and_a_stopped_one_says_so(self):
+        self.worker(pid=self.dead)
+        self.assertEqual(self.collect()["channel"]["state"], "not running")
+        self.worker(pid=self.dead, state="stopped")
+        self.assertEqual(self.collect()["channel"]["state"], "stopped")
+
+    def test_without_a_worker_the_jobs_dir_comes_from_the_command_line(self):
+        self.journal(7, 1, {}, {"state": "running", "started_at": self.now - 5})
+
+        self.assertEqual(self.collect()["attempts"], [])
+        data = self.collect(jobs_dirs=[self.jobs_dir])
+        self.assertEqual(([a["job"] for a in data["attempts"]], data["channel"]), ([7], None))
+
+    def test_the_command_line_needs_no_coordinator_and_opens_no_database(self):
+        self.journal(7, 1, {"command": "./bench"}, {"state": "running", "started_at": self.now - 5})
+        home = os.path.join(self.root, "home")
+        out, err = io.StringIO(), io.StringIO()
+        environ = dict(os.environ, FILA_COORDINATOR="nobody@nowhere.invalid")  # client mode would forward
+
+        code = main(["top", "--local", "--once", "--jobs-dir", self.jobs_dir, "--worker-dir", self.worker_dir,
+                     "--width", "100"], home=home, stdout=out, stderr=err, environ=environ)
+
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        self.assertTrue(any(line.split()[:3] == ["7", "1", "running"] for line in out.getvalue().splitlines()))
+        self.assertFalse(os.path.exists(os.path.join(home, "fila.db")))
+
+    def test_local_only_options(self):
+        out, err = io.StringIO(), io.StringIO()
+        home = os.path.join(self.root, "home")
+
+        self.assertEqual(main(["top", "--once", "--jobs-dir", self.jobs_dir], home=home, stdout=out, stderr=err), 5)
+        self.assertEqual(main(["top", "--local", "--once", "--node", "x", "--worker-dir", self.worker_dir],
+                              home=home, stdout=out, stderr=err), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -401,6 +401,12 @@ on. `resume` returns it to normal.
     writes it and exits with code 75, and the service starts it again from the
     new agent. On Windows this restart takes about 1 min, the task's restart
     interval.
+  - **`~/.fila/worker.json`** says where the channel stands, for
+    `fila top --local`: the coordinator, the node's name, the worker's PID,
+    the state (`connecting`, `connected`, `waiting` with `retry_at` and the
+    `reason` the last session ended, `stopped`), when the coordinator was last
+    heard (`heard_at`, at most a few seconds old while connected) and every
+    `jobs_dir` the requests named, kept across restarts.
 
 ### 4.4 Local journal
 
@@ -896,7 +902,8 @@ the common directives (`--cpus-per-task`, `--mem`, `--time`, `--partition`,
   - `stdout.log` and `stderr.log`;
   - `job.json`: command, shell, assigned CPUs, limits and variables;
   - `status.json`: the attempt's journal (state, PIDs, times, exit code,
-    reason, suspended time);
+    reason, `suspended`, `suspended_seconds` of the suspensions already over
+    and `suspended_since` of the current one, on the node's clock);
   - `supervisor.log`: errors of the supervisor itself;
   - `cancel` and `suspend`: requests to the supervisor; `suspend` present means
     "keep frozen";
@@ -921,6 +928,7 @@ fila submit [...] -- <command>                            # the queue (section 5
 fila status [--state S] [--node N] [--all]                # queue, running jobs and node summary
 fila resources                                            # what each node has free now
 fila top --once [--node N] [--all] [--width W]            # nodes, jobs and why each waits, on one screen
+fila top --local --once [--jobs-dir D] [--all]            # on a node: what fila runs here, from its own files
 fila guide                                                # the usage guide for an agent's instructions
 fila mcp [--register]                                     # the MCP server (stdio), or how to register it
 fila result <id>                                          # state, reason, code, node, attempts, directory, end of the log
@@ -958,6 +966,20 @@ the coordinator's heartbeat is old; the view still shows the database. Columns
 shrink or disappear below about 80 columns, the command first. `--once` prints
 one screen and exits; with `--json` it prints the same snapshot as data. The
 interactive view (refresh, keys, actions) is not available yet.
+
+**`top --local`.** The minimal view for whoever sits at a node, on any
+computer (`local`, `ssh` or `pull`), without the coordinator: nodes have no
+database, so it reads only what exists on the node. It shows the probe (cores
+and memory used, with the part held by `fila`'s attempts, and whether the
+machine is in use), the attempts in its jobs directories (running, suspended,
+starting, lost, and those that ended in the last hour; `--all` shows every
+ended one) with their CPUs, memory limit and running time, and, on a `pull`
+node, the channel from `~/.fila/worker.json` (section 4.3). The jobs
+directories are those the worker recorded plus any `--jobs-dir`; an `ssh` node
+needs `--jobs-dir`. It is read only: cancelling, suspending and draining stay
+on the coordinator, because a suspension made on the node would be undone by
+the server at its next cycle and a cancellation must be recorded in the
+database. It is never forwarded in client mode.
 
 **`wait`.** Blocks until every given job reaches a final state: `completed`,
 `failed`, `cancelled` or `blocked`. It only reads the local database, about once

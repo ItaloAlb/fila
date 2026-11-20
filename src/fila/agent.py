@@ -149,8 +149,17 @@ def statuses(args: dict) -> List[Optional[dict]]:
             status = supervisor.read_status(directory)  # it may have finished just now
             if status["state"] != "finished":
                 status = dict(status, state="lost")
-        result.append(status)
+        result.append(_with_suspended_for(status))
     return result
+
+
+def _with_suspended_for(status: dict) -> dict:
+    """Add the length of the ongoing suspension, measured with this machine's
+    clock, so the coordinator never compares two clocks."""
+    since = status.get("suspended_since")
+    if not status.get("suspended") or not since:
+        return status
+    return dict(status, suspended_for=max(0.0, time.time() - since))
 
 
 def cycle(args: dict, probe=None) -> dict:

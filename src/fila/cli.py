@@ -117,11 +117,12 @@ def main(
     except RegistryError as error:
         err.write(f"fila: {error}\n")
         return EXIT_USAGE
-    if client is not None and argv[:1] not in (["internal"], ["worker"], ["mcp"], ["guide"]):
+    on_this_machine = argv[:1] in (["internal"], ["worker"], ["mcp"], ["guide"]) or _local_top(argv)
+    if client is not None and not on_this_machine:
         return _forward(client, argv, out, err, environ)  # the MCP server stays here; each tool call is forwarded
     try:
         args = _parser().parse_args(argv)
-        if args.command_name in ("internal", "worker", "guide", "mcp"):  # no coordinator database here
+        if args.command_name in ("internal", "worker", "guide", "mcp") or _local_top(argv):  # no coordinator database
             args.home, args.out, args.err = home, out, err
             return args.handler(None, args)
         store = Store(os.path.join(home, "fila.db"))
@@ -166,6 +167,11 @@ def _attach_values(argv: List[str]) -> List[str]:
         result.append(arg)
         index += 1
     return result
+
+
+def _local_top(argv: List[str]) -> bool:
+    """``fila top --local`` reads this machine's files only: never forwarded, no database opened."""
+    return argv[:1] == ["top"] and "--local" in argv
 
 
 # --- Client mode (section 4.5) ---
@@ -285,6 +291,11 @@ def _parser() -> argparse.ArgumentParser:
     top.add_argument("--node", help="only this node and its jobs")
     top.add_argument("--all", action="store_true", help="include finished jobs")
     top.add_argument("--width", type=int, help="columns to draw (default: the terminal's width)")
+    top.add_argument("--local", action="store_true",
+                     help="this node's own view, from its files (no coordinator needed; read only)")
+    top.add_argument("--jobs-dir", action="append", default=[],
+                     help="with --local: a jobs directory to read (repeatable; pull workers record theirs)")
+    top.add_argument("--worker-dir", help="with --local: where fila worker keeps worker.json (default ~/.fila)")
     top.set_defaults(handler=_top)
 
     result = commands.add_parser("result", parents=[common], help="a job's outcome and attempts")
@@ -525,20 +536,31 @@ def _resources(ctx: Context, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _top(ctx: Context, args: argparse.Namespace) -> int:
-    """Section 11: the nodes, the jobs and why each waiting job waits, on one screen."""
+def _top(ctx: Optional[Context], args: argparse.Namespace) -> int:
+    """Section 11: the nodes, the jobs and why each waiting job waits, on one
+    screen; with ``--local``, what this node runs, from its own files."""
     from . import top
 
     if not args.once:
         raise UsageError("the interactive view is not available yet; use fila top --once")
-    general = ctx.registry.load()[0]
-    snapshot = top.collect(ctx.store, ctx.home, ctx.clock(), float(general["probe_interval_s"]),
-                           show_finished=args.all, node=args.node)
-    if ctx.json:
-        ctx.out.write(json.dumps(snapshot, indent=2) + "\n")
+    if not args.local and (args.jobs_dir or args.worker_dir):
+        raise UsageError("--jobs-dir and --worker-dir go with --local")
+    if args.local:
+        if args.node is not None:
+            raise UsageError("--node is for the coordinator's view; --local shows this node")
+        out = args.out
+        worker_dir = os.path.expanduser(args.worker_dir or "~/.fila")
+        snapshot = top.collect_local(worker_dir, args.jobs_dir, time.time(), show_finished=args.all)
+    else:
+        out = ctx.out
+        general = ctx.registry.load()[0]
+        snapshot = top.collect(ctx.store, ctx.home, ctx.clock(), float(general["probe_interval_s"]),
+                               show_finished=args.all, node=args.node)
+    if args.json:
+        out.write(json.dumps(snapshot, indent=2) + "\n")
         return EXIT_OK
     width = args.width or shutil.get_terminal_size((100, 24)).columns
-    ctx.out.write("\n".join(top.render(snapshot, width, charset=top.charset_for(ctx.out))) + "\n")
+    out.write("\n".join(top.render(snapshot, width, charset=top.charset_for(out))) + "\n")
     return EXIT_OK
 
 
