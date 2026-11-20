@@ -20,7 +20,6 @@ authors:
   - given-names: "Italo Carneiro"
     family-names: "Albuquerque"
     orcid: "https://orcid.org/0009-0007-3550-1787"
-    affiliation: "Universidade Federal do Ceará (UFC)"
 keywords:
   - "job scheduler"
   - "resource manager"
