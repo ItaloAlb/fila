@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 The fila Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fila"
+dynamic = ["version"]
+description = "Queue and resource manager that joins non-local computers and Slurm clusters"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "AUTHORS", "src/fila/_vendor/tomli/LICENSE"]
+authors = [{ name = "Italo Carneiro de Albuquerque" }]
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+]
+
+[project.urls]
+Repository = "https://github.com/ItaloAlb/fila"
+
+[project.scripts]
+fila = "fila.cli:entry"
+
+[tool.setuptools.dynamic]
+version = { attr = "fila.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"fila._vendor.tomli" = ["LICENSE"]

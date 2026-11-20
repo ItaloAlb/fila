@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 The fila Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: "fila"
+abstract: >-
+  fila is a queue and resource manager that joins computers sharing no
+  network or cluster (local machines, machines reached by SSH, machines behind
+  NAT) and Slurm clusters into a single pool. It runs opaque shell commands
+  with declared cores, memory and time on the fastest node that can start them,
+  enforces those limits, and records every outcome. It needs only Python 3.9
+  and OpenSSH, installs nothing on clusters, and exposes its commands to agents
+  through the Model Context Protocol.
+version: "0.1.0"
+date-released: "2026-11-20"
+license: GPL-3.0-or-later
+repository-code: "https://github.com/ItaloAlb/fila"
+authors:
+  - given-names: "Italo Carneiro"
+    family-names: "Albuquerque"
+    orcid: "https://orcid.org/0009-0007-3550-1787"
+    affiliation: "Universidade Federal do Ceará (UFC)"
+keywords:
+  - "job scheduler"
+  - "resource manager"
+  - "Slurm"
+  - "SSH"
+  - "research computing"
+  - "Model Context Protocol"

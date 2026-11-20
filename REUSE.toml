@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 The fila Authors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Licensing of files that cannot carry a comment header. Every other file has
+# its own SPDX header.
+version = 1
+
+[[annotations]]
+path = ["LICENSE", "AUTHORS"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 The fila Authors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
